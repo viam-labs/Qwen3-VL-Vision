@@ -1,7 +1,12 @@
 from typing import ClassVar, Mapping, Optional, Any, List, cast
 from typing_extensions import Self
 import json
+import os
 import re
+
+# Prefer quiet weight-load bars in Viam module logs (run.sh also sets these).
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TQDM_DISABLE", "1")
 
 from viam.proto.common import PointCloudObject
 from viam.proto.service.vision import Classification, Detection
@@ -22,6 +27,9 @@ from viam.logging import getLogger
 
 import torch
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+from transformers.utils.logging import disable_progress_bar
+
+disable_progress_bar()
 
 LOGGER = getLogger(__name__)
 

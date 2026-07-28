@@ -18,7 +18,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest
 ```
 
-The first run downloads model weights from Hugging Face (set `HF_TOKEN` if needed for rate limits or gated assets).
+On first module setup (`run.sh` before `.installed` exists), dependencies are installed and the default model weights are prefetched into the Hugging Face cache via `prefetch_model.py`. Set `HF_TOKEN` if needed for rate limits or gated assets. Override the prefetch checkpoint with `QWEN3_VL_MODEL`. Delete `.installed` and restart the module to re-run setup.
 
 ## Configure your vision service
 

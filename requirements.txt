@@ -3,4 +3,5 @@ pillow
 torch
 accelerate
 transformers>=4.57.0
+huggingface_hub
 qwen-vl-utils
