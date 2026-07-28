@@ -1,14 +1,11 @@
 from typing import ClassVar, Mapping, Optional, Any, List, cast
 from typing_extensions import Self
+import base64
 import json
 import os
 import re
-
-from . import _lzma_compat  # noqa: F401 - before transformers/torchvision
-
-# Prefer quiet weight-load bars in Viam module logs (run.sh also sets these).
-os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-os.environ.setdefault("TQDM_DISABLE", "1")
+from io import BytesIO
+from pathlib import Path
 
 from viam.proto.common import PointCloudObject
 from viam.proto.service.vision import Classification, Detection
@@ -27,18 +24,20 @@ from viam.media.utils.pil import viam_to_pil_image
 from viam.media.video import CameraMimeType
 from viam.logging import getLogger
 
-import torch
-from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
-from transformers.utils.logging import disable_progress_bar
-
-disable_progress_bar()
+from huggingface_hub import hf_hub_download
+from llama_cpp import Llama
+from llama_cpp.llama_chat_format import MTMDChatHandler
 
 LOGGER = getLogger(__name__)
 
-DEFAULT_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
+DEFAULT_MODEL_REPO = "Qwen/Qwen3-VL-2B-Instruct-GGUF"
+DEFAULT_MODEL_FILE = "Qwen3VL-2B-Instruct-Q4_K_M.gguf"
+DEFAULT_MMPROJ_FILE = "mmproj-Qwen3VL-2B-Instruct-F16.gguf"
 DEFAULT_CLASSIFICATION_PROMPT = "describe this image"
 DEFAULT_MAX_NEW_TOKENS = 512
 DEFAULT_DETECTION_MAX_NEW_TOKENS = 512
+DEFAULT_N_CTX = 4096
+DEFAULT_N_GPU_LAYERS = -1
 
 # Qwen3-VL grounding uses relative coordinates on a 0–1000 grid.
 BBOX_SCALE = 1000.0
@@ -61,15 +60,31 @@ _THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
 _JSON_ARRAY_RE = re.compile(r"\[[\s\S]*\]")
 
 
+def resolve_gguf_path(repo_id: str, filename: str, local_path: str = "") -> str:
+    """Return a local GGUF path, downloading from Hugging Face when needed."""
+    if local_path:
+        path = Path(local_path).expanduser()
+        if not path.is_file():
+            raise Exception(f"local model file not found: {path}")
+        return str(path)
+    return hf_hub_download(repo_id=repo_id, filename=filename)
+
+
+def pil_to_data_uri(pil_image) -> str:
+    buf = BytesIO()
+    pil_image.convert("RGB").save(buf, format="JPEG")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
 class qwen3_vl(Vision, Reconfigurable):
     """
-    Vision service backed by Qwen3-VL (Transformers).
+    Vision service backed by Qwen3-VL GGUF via llama.cpp (Metal / CUDA / CPU).
     """
 
     MODEL: ClassVar[Model] = Model(ModelFamily("viam-labs", "vision"), "qwen3-vl")
 
-    model: Any
-    processor: Any
+    llm: Any
     DEPS: Mapping[ResourceName, ResourceBase]
     classification_prompt: str
     max_new_tokens: int
@@ -119,16 +134,15 @@ class qwen3_vl(Vision, Reconfigurable):
                 fields["detection_max_new_tokens"].number_value
             )
 
-        # Greedy by default for speed/determinism on Mac MPS; enable sampling explicitly.
         self.do_sample = False
         if "do_sample" in fields:
             self.do_sample = fields["do_sample"].bool_value
 
-        self.temperature = 1.0
+        self.temperature = 0.7
         if "temperature" in fields:
             self.temperature = float(fields["temperature"].number_value)
 
-        self.top_p = 0.95
+        self.top_p = 0.8
         if "top_p" in fields:
             self.top_p = float(fields["top_p"].number_value)
 
@@ -136,26 +150,36 @@ class qwen3_vl(Vision, Reconfigurable):
         if "top_k" in fields:
             self.top_k = int(fields["top_k"].number_value)
 
-        model_id = fields["model"].string_value or DEFAULT_MODEL
-        device_map = fields["device_map"].string_value or "auto"
-        dtype_name = fields["dtype"].string_value or "auto"
+        repo_id = fields["model_repo"].string_value or DEFAULT_MODEL_REPO
+        model_file = fields["model_file"].string_value or DEFAULT_MODEL_FILE
+        mmproj_file = fields["mmproj_file"].string_value or DEFAULT_MMPROJ_FILE
+        model_path = fields["model_path"].string_value
+        mmproj_path = fields["mmproj_path"].string_value
 
-        dtype: Any = "auto"
-        if dtype_name and dtype_name != "auto":
-            dtype = getattr(torch, dtype_name)
-        elif torch.backends.mps.is_available():
-            # Prefer bf16 on Apple Silicon; plain "auto" often lands on slower float32 paths.
-            dtype = torch.bfloat16
+        n_ctx = DEFAULT_N_CTX
+        if "n_ctx" in fields:
+            n_ctx = int(fields["n_ctx"].number_value)
+
+        n_gpu_layers = DEFAULT_N_GPU_LAYERS
+        if "n_gpu_layers" in fields:
+            n_gpu_layers = int(fields["n_gpu_layers"].number_value)
+
+        resolved_model = resolve_gguf_path(repo_id, model_file, model_path)
+        resolved_mmproj = resolve_gguf_path(repo_id, mmproj_file, mmproj_path)
 
         LOGGER.info(
-            f"loading Qwen3-VL model '{model_id}' (device_map={device_map}, dtype={dtype})"
+            "loading Qwen3-VL GGUF via llama.cpp "
+            f"(model={resolved_model}, mmproj={resolved_mmproj}, "
+            f"n_gpu_layers={n_gpu_layers}, n_ctx={n_ctx})"
         )
-        self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_id,
-            dtype=dtype,
-            device_map=device_map,
+        chat_handler = MTMDChatHandler(clip_model_path=resolved_mmproj, verbose=False)
+        self.llm = Llama(
+            model_path=resolved_model,
+            chat_handler=chat_handler,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            verbose=False,
         )
-        self.processor = AutoProcessor.from_pretrained(model_id)
         return
 
     async def get_cam_image(self, camera_name: str) -> ViamImage:
@@ -189,42 +213,32 @@ class qwen3_vl(Vision, Reconfigurable):
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": pil_image},
                     {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": pil_to_data_uri(pil_image)},
+                    },
                 ],
             }
         ]
-        inputs = self.processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-        )
-        inputs = inputs.to(self.model.device)
 
-        gen_kwargs: dict[str, Any] = {"max_new_tokens": max_new_tokens}
         if greedy or not self.do_sample:
-            gen_kwargs["do_sample"] = False
+            completion = self.llm.create_chat_completion(
+                messages=messages,
+                max_tokens=max_new_tokens,
+                temperature=0.0,
+            )
         else:
-            gen_kwargs.update(
-                do_sample=True,
+            completion = self.llm.create_chat_completion(
+                messages=messages,
+                max_tokens=max_new_tokens,
                 temperature=self.temperature,
                 top_p=self.top_p,
                 top_k=self.top_k,
             )
 
-        generated_ids = self.model.generate(**inputs, **gen_kwargs)
-        trimmed = [
-            out_ids[len(in_ids) :]
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        decoded = self.processor.batch_decode(
-            trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-        return self._strip_thinking(decoded[0] if decoded else "")
+        content = completion["choices"][0]["message"].get("content") or ""
+        return self._strip_thinking(content)
 
     def _parse_json_array(self, text: str) -> List[Any]:
         cleaned = text.strip()
@@ -325,8 +339,6 @@ class qwen3_vl(Vision, Reconfigurable):
         extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> List[Detection]:
-        # Open-vocabulary grounding: one generate call returns bbox_2d JSON.
-        # See https://qwen.ai/blog and Qwen3-VL 2D grounding docs.
         pil_image = viam_to_pil_image(image)
         query = extra.get("query") if extra else None
         prompt = self._detection_prompt(query)

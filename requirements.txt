@@ -1,8 +1,4 @@
 viam-sdk~=0.79.0
 pillow
-torch
-torchvision
-accelerate
-transformers>=4.57.0
 huggingface_hub
-qwen-vl-utils
+llama-cpp-python>=0.3.34

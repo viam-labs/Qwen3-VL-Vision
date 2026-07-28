@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-"""Download Qwen3-VL weights into the Hugging Face cache during module setup."""
+"""Download default Qwen3-VL GGUF weights into the Hugging Face cache."""
 
 import os
 import sys
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download
 
-# Keep in sync with src/qwen3_vl.py DEFAULT_MODEL
-DEFAULT_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
+# Keep in sync with src/qwen3_vl.py defaults
+DEFAULT_MODEL_REPO = "Qwen/Qwen3-VL-2B-Instruct-GGUF"
+DEFAULT_MODEL_FILE = "Qwen3VL-2B-Instruct-Q4_K_M.gguf"
+DEFAULT_MMPROJ_FILE = "mmproj-Qwen3VL-2B-Instruct-F16.gguf"
 
 
 def main() -> int:
-    model_id = os.environ.get("QWEN3_VL_MODEL", DEFAULT_MODEL)
-    print(f"Prefetching '{model_id}' into Hugging Face cache...", flush=True)
-    path = snapshot_download(repo_id=model_id)
-    print(f"Cached at {path}", flush=True)
+    repo_id = os.environ.get("QWEN3_VL_MODEL_REPO", DEFAULT_MODEL_REPO)
+    model_file = os.environ.get("QWEN3_VL_MODEL_FILE", DEFAULT_MODEL_FILE)
+    mmproj_file = os.environ.get("QWEN3_VL_MMPROJ_FILE", DEFAULT_MMPROJ_FILE)
+
+    print(f"Prefetching '{repo_id}/{model_file}'...", flush=True)
+    model_path = hf_hub_download(repo_id=repo_id, filename=model_file)
+    print(f"Cached model at {model_path}", flush=True)
+
+    print(f"Prefetching '{repo_id}/{mmproj_file}'...", flush=True)
+    mmproj_path = hf_hub_download(repo_id=repo_id, filename=mmproj_file)
+    print(f"Cached mmproj at {mmproj_path}", flush=True)
     return 0
 
 

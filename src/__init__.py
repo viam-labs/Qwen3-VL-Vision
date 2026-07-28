@@ -2,8 +2,6 @@
 This file registers the model with the Python SDK.
 """
 
-from . import _lzma_compat  # noqa: F401 - before transformers/torchvision
-
 from viam.services.vision import Vision
 from viam.resource.registry import Registry, ResourceCreatorRegistration
 

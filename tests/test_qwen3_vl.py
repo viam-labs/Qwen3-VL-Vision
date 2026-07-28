@@ -2,7 +2,6 @@ from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import torch
 from PIL import Image
 from viam.components.camera import Camera
 from viam.media.video import CameraMimeType, ViamImage
@@ -29,45 +28,30 @@ def make_camera(image: ViamImage | None = None) -> MagicMock:
 
 
 @pytest.fixture
-def mock_hf():
-    model = MagicMock()
-    model.device = torch.device("cpu")
-    processor = MagicMock()
-
-    def apply_chat_template(*_args, **_kwargs):
-        inputs = MagicMock()
-        inputs.input_ids = torch.tensor([[1, 2, 3]])
-        inputs.to = MagicMock(return_value=inputs)
-        return inputs
-
-    processor.apply_chat_template.side_effect = apply_chat_template
-    processor.batch_decode.return_value = ["decoded"]
-
-    model.generate.return_value = torch.tensor([[1, 2, 3, 4, 5]])
+def mock_llama():
+    llm = MagicMock()
+    llm.create_chat_completion.return_value = {
+        "choices": [{"message": {"content": "decoded"}}]
+    }
+    handler = MagicMock()
 
     with (
-        patch(
-            "src.qwen3_vl.Qwen3VLForConditionalGeneration.from_pretrained",
-            return_value=model,
-        ) as from_pretrained,
-        patch(
-            "src.qwen3_vl.AutoProcessor.from_pretrained",
-            return_value=processor,
-        ) as proc_from_pretrained,
+        patch("src.qwen3_vl.hf_hub_download", side_effect=lambda **kw: f"/tmp/{kw['filename']}") as download,
+        patch("src.qwen3_vl.MTMDChatHandler", return_value=handler) as handler_cls,
+        patch("src.qwen3_vl.Llama", return_value=llm) as llama_cls,
     ):
-        yield from_pretrained, proc_from_pretrained, model, processor
+        yield download, handler_cls, llama_cls, llm
 
 
 @pytest.fixture
-def service(mock_hf):
-    _, _, model, processor = mock_hf
+def service(mock_llama):
+    _, _, _, llm = mock_llama
     cam = make_camera()
     deps = {Camera.get_resource_name("cam"): cam}
     config = make_config({"camera": "cam"})
     instance = Qwen3VL.new(config, deps)
     instance._test_camera = cam
-    instance._test_model = model
-    instance._test_processor = processor
+    instance._test_llm = llm
     return instance
 
 
@@ -81,37 +65,45 @@ class TestValidate:
 
 
 class TestReconfigure:
-    def test_defaults(self, mock_hf):
-        from_pretrained, proc_from_pretrained, _, _ = mock_hf
+    def test_defaults(self, mock_llama):
+        download, handler_cls, llama_cls, _ = mock_llama
         cam = make_camera()
         Qwen3VL.new(
             make_config({"camera": "cam"}),
             {Camera.get_resource_name("cam"): cam},
         )
-        from_pretrained.assert_called_once()
-        assert from_pretrained.call_args[0][0] == "Qwen/Qwen3-VL-2B-Instruct"
-        assert from_pretrained.call_args.kwargs["device_map"] == "auto"
-        proc_from_pretrained.assert_called_once_with("Qwen/Qwen3-VL-2B-Instruct")
+        assert download.call_count == 2
+        filenames = {c.kwargs["filename"] for c in download.call_args_list}
+        assert filenames == {
+            "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+            "mmproj-Qwen3VL-2B-Instruct-F16.gguf",
+        }
+        assert handler_cls.called
+        assert llama_cls.call_args.kwargs["n_gpu_layers"] == -1
+        assert llama_cls.call_args.kwargs["n_ctx"] == 4096
 
-    def test_custom_model(self, mock_hf):
-        from_pretrained, _, _, _ = mock_hf
+    def test_custom_files(self, mock_llama):
+        download, _, llama_cls, _ = mock_llama
         cam = make_camera()
         Qwen3VL.new(
             make_config(
                 {
                     "camera": "cam",
-                    "model": "Qwen/Qwen3-VL-4B-Instruct",
-                    "device_map": "cpu",
-                    "dtype": "float32",
+                    "model_repo": "Qwen/Qwen3-VL-2B-Instruct-GGUF",
+                    "model_file": "Qwen3VL-2B-Instruct-Q8_0.gguf",
+                    "mmproj_file": "mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf",
+                    "n_gpu_layers": 20,
+                    "n_ctx": 2048,
                 }
             ),
             {Camera.get_resource_name("cam"): cam},
         )
-        assert from_pretrained.call_args[0][0] == "Qwen/Qwen3-VL-4B-Instruct"
-        assert from_pretrained.call_args.kwargs["device_map"] == "cpu"
-        assert from_pretrained.call_args.kwargs["dtype"] is torch.float32
+        filenames = {c.kwargs["filename"] for c in download.call_args_list}
+        assert "Qwen3VL-2B-Instruct-Q8_0.gguf" in filenames
+        assert llama_cls.call_args.kwargs["n_gpu_layers"] == 20
+        assert llama_cls.call_args.kwargs["n_ctx"] == 2048
 
-    def test_missing_camera_dependency(self, mock_hf):
+    def test_missing_camera_dependency(self, mock_llama):
         with pytest.raises(Exception, match="camera dependency"):
             Qwen3VL.new(make_config({"camera": "cam"}), {})
 
@@ -121,17 +113,21 @@ class TestGeneration:
     async def test_detections_use_greedy_decoding(self, service):
         response = '[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]'
         with patch.object(service, "_generate", wraps=service._generate) as gen:
-            service._test_processor.batch_decode.return_value = [response]
+            service._test_llm.create_chat_completion.return_value = {
+                "choices": [{"message": {"content": response}}]
+            }
             await service.get_detections(make_jpeg_image())
         assert gen.call_args.kwargs.get("greedy") is True
 
     @pytest.mark.asyncio
-    async def test_generate_defaults_to_do_sample_false(self, service):
-        service._test_processor.batch_decode.return_value = ["ok"]
+    async def test_generate_defaults_to_temperature_zero(self, service):
+        service._test_llm.create_chat_completion.return_value = {
+            "choices": [{"message": {"content": "ok"}}]
+        }
         await service.get_classifications(make_jpeg_image(), 1)
-        kwargs = service._test_model.generate.call_args.kwargs
-        assert kwargs.get("do_sample") is False
-        assert kwargs.get("max_new_tokens") == 512
+        kwargs = service._test_llm.create_chat_completion.call_args.kwargs
+        assert kwargs.get("temperature") == 0.0
+        assert kwargs.get("max_tokens") == 512
 
 
 class TestClassifications:
@@ -143,7 +139,7 @@ class TestClassifications:
         assert gen.call_args[0][1] == "describe this image"
 
     @pytest.mark.asyncio
-    async def test_config_classification_prompt(self, mock_hf):
+    async def test_config_classification_prompt(self, mock_llama):
         cam = make_camera()
         service = Qwen3VL.new(
             make_config(
@@ -159,7 +155,7 @@ class TestClassifications:
         assert gen.call_args[0][1] == "what safety gear is visible?"
 
     @pytest.mark.asyncio
-    async def test_extra_question_overrides_config_prompt(self, mock_hf):
+    async def test_extra_question_overrides_config_prompt(self, mock_llama):
         cam = make_camera()
         service = Qwen3VL.new(
             make_config(
@@ -179,9 +175,11 @@ class TestClassifications:
 
     @pytest.mark.asyncio
     async def test_strips_thinking_content(self, service):
-        service._test_processor.batch_decode.return_value = [
-            "<think>reasoning here</think>\nfinal answer"
-        ]
+        service._test_llm.create_chat_completion.return_value = {
+            "choices": [
+                {"message": {"content": "<think>reasoning here</think>\nfinal answer"}}
+            ]
+        }
         result = await service.get_classifications(make_jpeg_image(), 1)
         assert result[0]["class_name"] == "final answer"
 
@@ -193,7 +191,7 @@ class TestClassifications:
         service._test_camera.get_images.assert_awaited()
 
     @pytest.mark.asyncio
-    async def test_from_camera_uses_requested_camera(self, mock_hf):
+    async def test_from_camera_uses_requested_camera(self, mock_llama):
         cam_a = make_camera()
         cam_b = make_camera()
         deps = {
@@ -273,7 +271,7 @@ class TestDetections:
         service._test_camera.get_images.assert_awaited()
 
     @pytest.mark.asyncio
-    async def test_from_camera_uses_requested_camera(self, mock_hf):
+    async def test_from_camera_uses_requested_camera(self, mock_llama):
         cam_a = make_camera()
         cam_b = make_camera()
         service = Qwen3VL.new(
@@ -332,7 +330,7 @@ class TestPropertiesAndCaptureAll:
         gen.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_capture_all_uses_requested_camera(self, mock_hf):
+    async def test_capture_all_uses_requested_camera(self, mock_llama):
         cam_a = make_camera()
         cam_b = make_camera()
         service = Qwen3VL.new(

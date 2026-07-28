@@ -1,10 +1,22 @@
 #!/bin/bash
 cd `dirname $0`
 
-# Quiet Hugging Face / tqdm progress bars once the module process is running
-# (weight load still happens in-process; download is done at setup below).
 export HF_HUB_DISABLE_PROGRESS_BARS=1
 export TQDM_DISABLE=1
+
+install_requirements() {
+  # Build llama-cpp-python with the best available accelerator.
+  if [ "$(uname -s)" = "Darwin" ]; then
+    echo "Installing deps with llama.cpp Metal support..."
+    CMAKE_ARGS="-DGGML_METAL=on" pip3 install --upgrade -r requirements.txt
+  elif command -v nvidia-smi >/dev/null 2>&1; then
+    echo "Installing deps with llama.cpp CUDA support..."
+    CMAKE_ARGS="-DGGML_CUDA=on" pip3 install --upgrade -r requirements.txt
+  else
+    echo "Installing deps with llama.cpp CPU support..."
+    pip3 install --upgrade -r requirements.txt
+  fi
+}
 
 if [ -f .installed ]
   then
@@ -13,11 +25,10 @@ if [ -f .installed ]
     python3 -m pip install --user virtualenv --break-system-packages
     python3 -m venv viam-env
     source viam-env/bin/activate
-    pip3 install --upgrade -r requirements.txt
+    install_requirements
     if [ $? -eq 0 ]
       then
-        # Download default weights now so configure-time logs stay clean.
-        # Override with QWEN3_VL_MODEL if you use a non-default checkpoint.
+        # Download default GGUF + mmproj so configure-time logs stay clean.
         python3 prefetch_model.py
         if [ $? -eq 0 ]
           then
