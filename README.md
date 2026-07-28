@@ -1,6 +1,6 @@
-# Qwen3.5 modular vision service
+# Qwen modular vision service
 
-This module implements the [rdk vision API](https://github.com/rdk/vision-api) in a `viam-labs:vision:qwen3-vl` model.
+This module implements the [rdk vision API](https://github.com/rdk/vision-api) in a `viam-labs:vision:qwen` model.
 
 It runs [Qwen3.5-0.8B GGUF](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF) locally via [llama.cpp](https://github.com/ggerganov/llama.cpp) / [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) for fast image classification / Q&A and object detection (`bbox_2d` grounding) on mobile and edge devices.
 
@@ -13,7 +13,7 @@ Defaults (tuned for speed):
 
 ## Build and Run
 
-To use this module, follow these instructions to [add a module from the Viam Registry](https://docs.viam.com/registry/configure/#add-a-modular-resource-from-the-viam-registry) and select the `viam-labs:vision:qwen3-vl` model from the [viam-labs qwen3-vl-vision module](https://app.viam.com/module/viam-labs/qwen3-vl-vision).
+To use this module, follow these instructions to [add a module from the Viam Registry](https://docs.viam.com/registry/configure/#add-a-modular-resource-from-the-viam-registry) and select the `viam-labs:vision:qwen` model from the [viam-labs qwen-vision module](https://app.viam.com/module/viam-labs/qwen-vision).
 
 For local development:
 
@@ -33,7 +33,7 @@ On first module setup (`run.sh` before `.installed` exists), dependencies are in
 
 Navigate to the **Config** tab of your robot’s page in [the Viam app](https://app.viam.com/).
 Click on the **Service** subtab and click **Create service**.
-Select the `vision` type, then select the `viam-labs:vision:qwen3-vl` model.
+Select the `vision` type, then select the `viam-labs:vision:qwen` model.
 Enter a name for your vision service and click **Create**.
 
 On the new service panel, copy and paste the following attribute template into your vision service's **Attributes** box:
@@ -123,3 +123,11 @@ Override the prompt with `extra={"question": "..."}`.
 Asks for JSON `{"bbox_2d": [x1,y1,x2,y2], "label": "..."}` on the 0–1000 grid, then converts to Viam detections.
 
 By default this uses **one** vision pass grounding a fixed common-category list (person, chair, laptop, etc.). Pass `extra={"query": "person, chair, laptop"}` for your own classes in one pass, or set `"auto_label": true` to list objects first then ground them (~2x slower, fully open-vocab).
+
+## Migration from `qwen3-vl-vision`
+
+**Breaking:** module `viam-labs:qwen3-vl-vision` / model `viam-labs:vision:qwen3-vl` are replaced by:
+- Module: `viam-labs:qwen-vision`
+- Model: `viam-labs:vision:qwen`
+
+Remove the old module from your machine config and add `viam-labs:qwen-vision`, then recreate the vision service with model `viam-labs:vision:qwen`. Attributes are unchanged.

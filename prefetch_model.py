@@ -6,7 +6,7 @@ import sys
 
 from huggingface_hub import hf_hub_download
 
-# Keep in sync with src/qwen3_vl.py defaults
+# Keep in sync with src/qwen.py defaults
 DEFAULT_MODEL_REPO = "unsloth/Qwen3.5-0.8B-GGUF"
 DEFAULT_MODEL_FILE = "Qwen3.5-0.8B-Q4_K_M.gguf"
 DEFAULT_MMPROJ_FILE = "mmproj-F16.gguf"

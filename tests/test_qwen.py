@@ -8,13 +8,13 @@ from viam.media.video import CameraMimeType, ViamImage
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
-from src.qwen3_vl import qwen3_vl as Qwen3VL
+from src.qwen import qwen as Qwen
 import importlib
 
-qwen_mod = importlib.import_module("src.qwen3_vl")
+qwen_mod = importlib.import_module("src.qwen")
 
 
-def make_config(attrs: dict, name: str = "qwen3-vl") -> ComponentConfig:
+def make_config(attrs: dict, name: str = "qwen") -> ComponentConfig:
     return ComponentConfig(name=name, attributes=dict_to_struct(attrs))
 
 
@@ -40,13 +40,13 @@ def mock_llama():
 
     with (
         patch(
-            "src.qwen3_vl.hf_hub_download",
+            "src.qwen.hf_hub_download",
             side_effect=lambda **kw: f"/tmp/{kw['filename']}",
         ) as download,
-        patch("src.qwen3_vl.MTMDChatHandler", return_value=handler) as handler_cls,
-        patch("src.qwen3_vl.Llama", return_value=llm) as llama_cls,
-        patch("src.qwen3_vl._quiet_llama_logs"),
-        patch("src.qwen3_vl.suppress_stdout_stderr"),
+        patch("src.qwen.MTMDChatHandler", return_value=handler) as handler_cls,
+        patch("src.qwen.Llama", return_value=llm) as llama_cls,
+        patch("src.qwen._quiet_llama_logs"),
+        patch("src.qwen.suppress_stdout_stderr"),
     ):
         yield download, handler_cls, llama_cls, llm
 
@@ -57,7 +57,7 @@ def service(mock_llama):
     cam = make_camera()
     deps = {Camera.get_resource_name("cam"): cam}
     config = make_config({"camera": "cam"})
-    instance = Qwen3VL.new(config, deps)
+    instance = Qwen.new(config, deps)
     instance._test_camera = cam
     instance._test_llm = llm
     return instance
@@ -66,17 +66,17 @@ def service(mock_llama):
 class TestValidate:
     def test_requires_camera(self):
         with pytest.raises(Exception, match="camera is required"):
-            Qwen3VL.validate(make_config({}))
+            Qwen.validate(make_config({}))
 
     def test_returns_camera_dependency(self):
-        assert Qwen3VL.validate(make_config({"camera": "cam"})) == (["cam"], [])
+        assert Qwen.validate(make_config({"camera": "cam"})) == (["cam"], [])
 
 
 class TestReconfigure:
     def test_defaults(self, mock_llama):
         download, handler_cls, llama_cls, _ = mock_llama
         cam = make_camera()
-        Qwen3VL.new(
+        Qwen.new(
             make_config({"camera": "cam"}),
             {Camera.get_resource_name("cam"): cam},
         )
@@ -93,7 +93,7 @@ class TestReconfigure:
     def test_custom_files(self, mock_llama):
         download, _, llama_cls, _ = mock_llama
         cam = make_camera()
-        Qwen3VL.new(
+        Qwen.new(
             make_config(
                 {
                     "camera": "cam",
@@ -113,7 +113,7 @@ class TestReconfigure:
 
     def test_missing_camera_dependency(self, mock_llama):
         with pytest.raises(Exception, match="camera dependency"):
-            Qwen3VL.new(make_config({"camera": "cam"}), {})
+            Qwen.new(make_config({"camera": "cam"}), {})
 
 
 class TestGeneration:
@@ -150,7 +150,7 @@ class TestClassifications:
     @pytest.mark.asyncio
     async def test_config_classification_prompt(self, mock_llama):
         cam = make_camera()
-        service = Qwen3VL.new(
+        service = Qwen.new(
             make_config(
                 {
                     "camera": "cam",
@@ -166,7 +166,7 @@ class TestClassifications:
     @pytest.mark.asyncio
     async def test_extra_question_overrides_config_prompt(self, mock_llama):
         cam = make_camera()
-        service = Qwen3VL.new(
+        service = Qwen.new(
             make_config(
                 {
                     "camera": "cam",
@@ -207,7 +207,7 @@ class TestClassifications:
             Camera.get_resource_name("cam-a"): cam_a,
             Camera.get_resource_name("cam-b"): cam_b,
         }
-        service = Qwen3VL.new(make_config({"camera": "cam-a"}), deps)
+        service = Qwen.new(make_config({"camera": "cam-a"}), deps)
         with patch.object(service, "_generate", return_value="from cam-b"):
             await service.get_classifications_from_camera("cam-b", 1)
         cam_b.get_images.assert_awaited()
@@ -303,7 +303,7 @@ class TestDetections:
     async def test_from_camera_uses_requested_camera(self, mock_llama):
         cam_a = make_camera()
         cam_b = make_camera()
-        service = Qwen3VL.new(
+        service = Qwen.new(
             make_config({"camera": "cam-a"}),
             {
                 Camera.get_resource_name("cam-a"): cam_a,
@@ -374,7 +374,7 @@ class TestPropertiesAndCaptureAll:
     async def test_capture_all_uses_requested_camera(self, mock_llama):
         cam_a = make_camera()
         cam_b = make_camera()
-        service = Qwen3VL.new(
+        service = Qwen.new(
             make_config({"camera": "cam-a"}),
             {
                 Camera.get_resource_name("cam-a"): cam_a,

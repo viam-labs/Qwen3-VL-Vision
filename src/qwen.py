@@ -151,12 +151,12 @@ def strip_markdown_json(text: str) -> str:
     return cleaned.strip()
 
 
-class qwen3_vl(Vision, Reconfigurable):
+class qwen(Vision, Reconfigurable):
     """
     Vision service backed by Qwen3.5 GGUF via llama.cpp (Metal / CUDA / CPU).
     """
 
-    MODEL: ClassVar[Model] = Model(ModelFamily("viam-labs", "vision"), "qwen3-vl")
+    MODEL: ClassVar[Model] = Model(ModelFamily("viam-labs", "vision"), "qwen")
 
     llm: Any
     DEPS: Mapping[ResourceName, ResourceBase]
