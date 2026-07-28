@@ -6,6 +6,8 @@ It runs [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-2B-Thinking) locally via
 
 Local inference needs enough GPU or Apple Silicon / CPU memory for the chosen checkpoint. The 2B Thinking model is the lightest starting point; larger Instruct / Thinking variants work by setting `model`.
 
+If your Python was built without `lzma` (common with some pyenv installs), this module installs a compatibility shim so `torchvision` / `AutoProcessor` can import. Prefer a Python with `libxz`/`lzma` support when possible (`brew install xz` before building Python).
+
 ## Build and Run
 
 To use this module, follow these instructions to [add a module from the Viam Registry](https://docs.viam.com/registry/configure/#add-a-modular-resource-from-the-viam-registry) and select the `viam-labs:vision:qwen3-vl` model from the [viam-labs qwen3-vl-vision module](https://app.viam.com/module/viam-labs/qwen3-vl-vision).

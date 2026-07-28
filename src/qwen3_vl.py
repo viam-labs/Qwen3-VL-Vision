@@ -4,6 +4,8 @@ import json
 import os
 import re
 
+from . import _lzma_compat  # noqa: F401 - before transformers/torchvision
+
 # Prefer quiet weight-load bars in Viam module logs (run.sh also sets these).
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TQDM_DISABLE", "1")
