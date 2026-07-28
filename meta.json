@@ -1,0 +1,15 @@
+{
+  "module_id": "viam-labs:qwen3-vl-vision",
+  "visibility": "public",
+  "url": "https://github.com/viam-labs/Qwen3-VL-Vision",
+  "description": "This vision model leverages Qwen3-VL (default: Qwen3-VL-2B-Thinking) via Hugging Face Transformers for image classification, querying, and open-vocabulary object detection with bounding boxes.",
+  "models": [
+    {
+      "api": "rdk:service:vision",
+      "model": "viam-labs:vision:qwen3-vl",
+      "markdown_link": "README.md#configure-your-vision-service",
+      "short_description": "Qwen3-VL local vision for classification, Q&A, and detection"
+    }
+  ],
+  "entrypoint": "run.sh"
+}
