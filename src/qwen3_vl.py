@@ -39,23 +39,26 @@ DEFAULT_MODEL_FILE = "Qwen3VL-2B-Instruct-Q4_K_M.gguf"
 DEFAULT_MMPROJ_FILE = "mmproj-Qwen3VL-2B-Instruct-F16.gguf"
 DEFAULT_CLASSIFICATION_PROMPT = "describe this image in one short sentence"
 DEFAULT_MAX_NEW_TOKENS = 128
-DEFAULT_DETECTION_MAX_NEW_TOKENS = 512
+DEFAULT_DETECTION_MAX_NEW_TOKENS = 768
 DEFAULT_N_CTX = 4096
 DEFAULT_N_GPU_LAYERS = -1
-DEFAULT_MAX_IMAGE_SIDE = 768
+# 1024 keeps small objects better than 768 while staying much faster than full camera res.
+DEFAULT_MAX_IMAGE_SIDE = 1024
 
 # Qwen3-VL grounding uses relative coordinates on a 0–1000 grid.
 BBOX_SCALE = 1000.0
 
-# Match Qwen3-VL 2D grounding cookbook phrasing.
-DETECTION_PROMPT_ALL = (
-    "Locate every object in this image. "
-    "Report bbox coordinates in JSON format."
+# Qwen grounding is strongest when categories are explicit (cookbook style).
+LIST_OBJECTS_PROMPT = (
+    "List all distinct visible objects in this image. "
+    "Include people, furniture, electronics, clothing, and other items. "
+    "Return a simple comma-separated list of object names only, with no extra text."
 )
 
 DETECTION_PROMPT_QUERY = (
     'Locate every instance that belongs to the following categories: "{query}". '
-    "Report bbox coordinates in JSON format."
+    "Report bbox coordinates in JSON format as a list of objects with keys "
+    '"bbox_2d" ([x1, y1, x2, y2] in 0-1000) and "label".'
 )
 
 _THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
@@ -421,10 +424,32 @@ class qwen3_vl(Vision, Reconfigurable):
             )
         return detections
 
+    def _list_object_names(self, pil_image) -> List[str]:
+        """Ask for a comma-separated object list, then ground those categories."""
+        answer = self._generate(
+            pil_image, LIST_OBJECTS_PROMPT, max_new_tokens=128, greedy=True
+        )
+        # Models sometimes return "a, b, and c" or bullet lines.
+        cleaned = answer.replace("\n", ",")
+        names: List[str] = []
+        seen = set()
+        for part in cleaned.split(","):
+            name = part.strip().strip(".-•*").strip()
+            if name.lower().startswith("and "):
+                name = name[4:].strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+        return names
+
     def _detection_prompt(self, query: Optional[str] = None) -> str:
         if query and str(query).strip():
             return DETECTION_PROMPT_QUERY.format(query=str(query).strip())
-        return DETECTION_PROMPT_ALL
+        return DETECTION_PROMPT_QUERY.format(query="object")
 
     async def get_detections_from_camera(
         self,
@@ -444,8 +469,19 @@ class qwen3_vl(Vision, Reconfigurable):
         extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> List[Detection]:
+        # Open-vocab: list objects first, then ground with explicit categories
+        # (Qwen cookbook-style). Pass extra={"query": "person, chair, laptop"}
+        # to skip listing and detect only those classes.
         pil_image = self._prepare_image(image)
         query = extra.get("query") if extra else None
+        if not (query and str(query).strip()):
+            names = self._list_object_names(pil_image)
+            if not names:
+                LOGGER.warning("object listing returned no names; no detections")
+                return []
+            query = ", ".join(names)
+            LOGGER.debug(f"auto-listed detection categories: {query}")
+
         prompt = self._detection_prompt(query)
         max_tokens = self.detection_max_new_tokens
         if extra is not None and extra.get("max_new_tokens") is not None:

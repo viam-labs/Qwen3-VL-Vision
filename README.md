@@ -61,8 +61,8 @@ On the new service panel, copy and paste the following attribute template into y
 | `n_ctx` | number | Optional | Context window (default `4096`). |
 | `classification_prompt` | string | Optional | Default classification question (`describe this image`). |
 | `max_new_tokens` | number | Optional | Max tokens for classification (default `128`). |
-| `detection_max_new_tokens` | number | Optional | Max tokens for detection JSON (default `512`). |
-| `max_image_side` | number | Optional | Longest image side in pixels before inference (default `768`). Lower is faster. |
+| `detection_max_new_tokens` | number | Optional | Max tokens for detection JSON (default `768`). |
+| `max_image_side` | number | Optional | Longest image side in pixels before inference (default `1024`). Lower is faster; higher finds smaller objects. |
 | `do_sample` | bool | Optional | Enable sampling for classifications (default `false`). Detections are always greedy. |
 | `temperature` | number | Optional | Sampling temperature when `do_sample` is true (default `0.7`). |
 | `top_p` | number | Optional | Nucleus sampling when `do_sample` is true (default `0.8`). |
@@ -105,4 +105,6 @@ Override the prompt with `extra={"question": "..."}`.
 
 ### get_detections / get_detections_from_camera
 
-Asks for JSON `{"bbox_2d": [x1,y1,x2,y2], "label": "..."}` on the 0–1000 grid, then converts to Viam detections. Limit objects with `extra={"query": "people"}`.
+Asks for JSON `{"bbox_2d": [x1,y1,x2,y2], "label": "..."}` on the 0–1000 grid, then converts to Viam detections.
+
+By default this uses an auto-label flow (list visible objects, then ground those categories — Qwen is much better with explicit categories than a vague “detect everything”). Limit or specify classes with `extra={"query": "person, chair, laptop"}`.

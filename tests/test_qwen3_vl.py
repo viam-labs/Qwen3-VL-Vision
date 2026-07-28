@@ -221,12 +221,17 @@ class TestDetections:
             '[{"bbox_2d": [100, 200, 300, 400], "label": "person"}, '
             '{"bbox_2d": [500, 500, 900, 900], "label": "chair"}]'
         )
-        with patch.object(service, "_generate", return_value=response) as gen:
+        with (
+            patch.object(
+                service, "_list_object_names", return_value=["person", "chair"]
+            ) as list_objs,
+            patch.object(service, "_generate", return_value=response) as gen,
+        ):
             result = await service.get_detections(make_jpeg_image(100, 50))
 
+        list_objs.assert_called_once()
         prompt = gen.call_args[0][1]
-        assert "Locate every object" in prompt
-        assert "Report bbox coordinates in JSON format" in prompt
+        assert 'categories: "person, chair"' in prompt
         assert [d.class_name for d in result] == ["person", "chair"]
         assert result[0].x_min == 10
         assert result[0].y_min == 10
@@ -246,45 +251,37 @@ class TestDetections:
         assert result[0].x_min == 10
 
     @pytest.mark.asyncio
-    async def test_query_limits_detection(self, service):
+    async def test_query_skips_listing(self, service):
         response = '[{"bbox_2d": [0, 0, 1000, 1000], "label": "person"}]'
-        with patch.object(service, "_generate", return_value=response) as gen:
+        with (
+            patch.object(service, "_list_object_names") as list_objs,
+            patch.object(service, "_generate", return_value=response) as gen,
+        ):
             result = await service.get_detections(
                 make_jpeg_image(), extra={"query": "people"}
             )
+        list_objs.assert_not_called()
         prompt = gen.call_args[0][1]
         assert 'categories: "people"' in prompt
         assert result[0].class_name == "person"
 
     @pytest.mark.asyncio
-    async def test_strips_thinking_before_json(self, service):
-        response = (
-            "<think>I see a cup</think>\n"
-            '[{"bbox_2d": [0, 0, 500, 500], "label": "cup"}]'
-        )
-        text = service._strip_thinking(response)
-        result = service._detections_from_response(text, 100, 50)
-        assert len(result) == 1
-        assert result[0].class_name == "cup"
-        assert result[0].x_max == 50
-
-    @pytest.mark.asyncio
-    async def test_parses_fenced_json(self, service):
-        response = '```json\n[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]\n```'
-        result = service._detections_from_response(response, 100, 50)
-        assert result[0].class_name == "box"
-        assert result[0].x_max == 100
-
-    @pytest.mark.asyncio
-    async def test_empty_or_invalid_output(self, service):
-        with patch.object(service, "_generate", return_value="no boxes here"):
+    async def test_empty_object_list(self, service):
+        with (
+            patch.object(service, "_list_object_names", return_value=[]),
+            patch.object(service, "_generate") as gen,
+        ):
             result = await service.get_detections(make_jpeg_image())
         assert result == []
+        gen.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_from_camera(self, service):
         response = '[{"bbox_2d": [0, 0, 500, 500], "label": "cup"}]'
-        with patch.object(service, "_generate", return_value=response):
+        with (
+            patch.object(service, "_list_object_names", return_value=["cup"]),
+            patch.object(service, "_generate", return_value=response),
+        ):
             result = await service.get_detections_from_camera("cam")
         assert len(result) == 1
         service._test_camera.get_images.assert_awaited()
@@ -300,10 +297,13 @@ class TestDetections:
                 Camera.get_resource_name("cam-b"): cam_b,
             },
         )
-        with patch.object(
-            service,
-            "_generate",
-            return_value='[{"bbox_2d": [0, 0, 500, 500], "label": "cup"}]',
+        with (
+            patch.object(service, "_list_object_names", return_value=["cup"]),
+            patch.object(
+                service,
+                "_generate",
+                return_value='[{"bbox_2d": [0, 0, 500, 500], "label": "cup"}]',
+            ),
         ):
             await service.get_detections_from_camera("cam-b")
         cam_b.get_images.assert_awaited()
@@ -332,13 +332,16 @@ class TestPropertiesAndCaptureAll:
 
     @pytest.mark.asyncio
     async def test_capture_all_respects_flags(self, service):
-        with patch.object(
-            service,
-            "_generate",
-            side_effect=[
-                "a scene",
-                '[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]',
-            ],
+        with (
+            patch.object(service, "_list_object_names", return_value=["box"]),
+            patch.object(
+                service,
+                "_generate",
+                side_effect=[
+                    "a scene",
+                    '[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]',
+                ],
+            ),
         ):
             result = await service.capture_all_from_camera(
                 "cam",
