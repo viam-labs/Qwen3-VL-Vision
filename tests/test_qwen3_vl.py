@@ -222,16 +222,14 @@ class TestDetections:
             '{"bbox_2d": [500, 500, 900, 900], "label": "chair"}]'
         )
         with (
-            patch.object(
-                service, "_list_object_names", return_value=["person", "chair"]
-            ) as list_objs,
+            patch.object(service, "_list_object_names") as list_objs,
             patch.object(service, "_generate", return_value=response) as gen,
         ):
             result = await service.get_detections(make_jpeg_image(100, 50))
 
-        list_objs.assert_called_once()
+        list_objs.assert_not_called()
         prompt = gen.call_args[0][1]
-        assert 'categories: "person, chair"' in prompt
+        assert "Locate every visible object" in prompt
         assert [d.class_name for d in result] == ["person", "chair"]
         assert result[0].x_min == 10
         assert result[0].y_min == 10
@@ -266,22 +264,37 @@ class TestDetections:
         assert result[0].class_name == "person"
 
     @pytest.mark.asyncio
-    async def test_empty_object_list(self, service):
+    async def test_auto_label_lists_then_grounds(self, service):
+        response = '[{"bbox_2d": [0, 0, 1000, 1000], "label": "chair"}]'
+        with (
+            patch.object(
+                service, "_list_object_names", return_value=["person", "chair"]
+            ) as list_objs,
+            patch.object(service, "_generate", return_value=response) as gen,
+        ):
+            result = await service.get_detections(
+                make_jpeg_image(), extra={"auto_label": True}
+            )
+        list_objs.assert_called_once()
+        assert 'categories: "person, chair"' in gen.call_args[0][1]
+        assert result[0].class_name == "chair"
+
+    @pytest.mark.asyncio
+    async def test_auto_label_empty_list(self, service):
         with (
             patch.object(service, "_list_object_names", return_value=[]),
             patch.object(service, "_generate") as gen,
         ):
-            result = await service.get_detections(make_jpeg_image())
+            result = await service.get_detections(
+                make_jpeg_image(), extra={"auto_label": True}
+            )
         assert result == []
         gen.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_from_camera(self, service):
         response = '[{"bbox_2d": [0, 0, 500, 500], "label": "cup"}]'
-        with (
-            patch.object(service, "_list_object_names", return_value=["cup"]),
-            patch.object(service, "_generate", return_value=response),
-        ):
+        with patch.object(service, "_generate", return_value=response):
             result = await service.get_detections_from_camera("cam")
         assert len(result) == 1
         service._test_camera.get_images.assert_awaited()
@@ -297,13 +310,10 @@ class TestDetections:
                 Camera.get_resource_name("cam-b"): cam_b,
             },
         )
-        with (
-            patch.object(service, "_list_object_names", return_value=["cup"]),
-            patch.object(
-                service,
-                "_generate",
-                return_value='[{"bbox_2d": [0, 0, 500, 500], "label": "cup"}]',
-            ),
+        with patch.object(
+            service,
+            "_generate",
+            return_value='[{"bbox_2d": [0, 0, 500, 500], "label": "cup"}]',
         ):
             await service.get_detections_from_camera("cam-b")
         cam_b.get_images.assert_awaited()
@@ -332,16 +342,13 @@ class TestPropertiesAndCaptureAll:
 
     @pytest.mark.asyncio
     async def test_capture_all_respects_flags(self, service):
-        with (
-            patch.object(service, "_list_object_names", return_value=["box"]),
-            patch.object(
-                service,
-                "_generate",
-                side_effect=[
-                    "a scene",
-                    '[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]',
-                ],
-            ),
+        with patch.object(
+            service,
+            "_generate",
+            side_effect=[
+                "a scene",
+                '[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]',
+            ],
         ):
             result = await service.capture_all_from_camera(
                 "cam",

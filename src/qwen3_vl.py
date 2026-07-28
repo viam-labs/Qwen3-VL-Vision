@@ -42,13 +42,21 @@ DEFAULT_MAX_NEW_TOKENS = 128
 DEFAULT_DETECTION_MAX_NEW_TOKENS = 768
 DEFAULT_N_CTX = 4096
 DEFAULT_N_GPU_LAYERS = -1
-# 1024 keeps small objects better than 768 while staying much faster than full camera res.
-DEFAULT_MAX_IMAGE_SIDE = 1024
+DEFAULT_MAX_IMAGE_SIDE = 768
 
 # Qwen3-VL grounding uses relative coordinates on a 0–1000 grid.
 BBOX_SCALE = 1000.0
 
-# Qwen grounding is strongest when categories are explicit (cookbook style).
+# Single-pass open-vocab (default): one vision encode. Stronger than a vague
+# "locate every object" line, without the 2x latency of list-then-ground.
+DETECTION_PROMPT_ALL = (
+    "Locate every visible object in this image, including people, furniture, "
+    "electronics, clothing, and other items. "
+    "Output a JSON array only. Each item must have "
+    '"bbox_2d": [x1, y1, x2, y2] integers in 0-1000 and "label". '
+    "Include as many distinct objects as you can see."
+)
+
 LIST_OBJECTS_PROMPT = (
     "List all distinct visible objects in this image. "
     "Include people, furniture, electronics, clothing, and other items. "
@@ -152,6 +160,7 @@ class qwen3_vl(Vision, Reconfigurable):
     max_new_tokens: int
     detection_max_new_tokens: int
     max_image_side: int
+    auto_label: bool
     do_sample: bool
     temperature: float
     top_p: float
@@ -200,6 +209,11 @@ class qwen3_vl(Vision, Reconfigurable):
         self.max_image_side = DEFAULT_MAX_IMAGE_SIDE
         if "max_image_side" in fields:
             self.max_image_side = int(fields["max_image_side"].number_value)
+
+        # Two-pass list-then-ground. More recall, roughly 2x slower. Off by default.
+        self.auto_label = False
+        if "auto_label" in fields:
+            self.auto_label = fields["auto_label"].bool_value
 
         self.do_sample = False
         if "do_sample" in fields:
@@ -449,7 +463,12 @@ class qwen3_vl(Vision, Reconfigurable):
     def _detection_prompt(self, query: Optional[str] = None) -> str:
         if query and str(query).strip():
             return DETECTION_PROMPT_QUERY.format(query=str(query).strip())
-        return DETECTION_PROMPT_QUERY.format(query="object")
+        return DETECTION_PROMPT_ALL
+
+    def _resolve_auto_label(self, extra: Optional[Mapping[str, Any]]) -> bool:
+        if extra is not None and "auto_label" in extra:
+            return bool(extra["auto_label"])
+        return self.auto_label
 
     async def get_detections_from_camera(
         self,
@@ -469,12 +488,13 @@ class qwen3_vl(Vision, Reconfigurable):
         extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> List[Detection]:
-        # Open-vocab: list objects first, then ground with explicit categories
-        # (Qwen cookbook-style). Pass extra={"query": "person, chair, laptop"}
-        # to skip listing and detect only those classes.
+        # Default: one vision pass with a strong open-vocab JSON prompt.
+        # Optional auto_label (config or extra): list objects, then ground those
+        # categories (better recall, ~2x slower). Or pass extra.query to ground
+        # only specific classes in one pass.
         pil_image = self._prepare_image(image)
         query = extra.get("query") if extra else None
-        if not (query and str(query).strip()):
+        if not (query and str(query).strip()) and self._resolve_auto_label(extra):
             names = self._list_object_names(pil_image)
             if not names:
                 LOGGER.warning("object listing returned no names; no detections")
