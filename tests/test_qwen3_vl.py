@@ -9,6 +9,9 @@ from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
 from src.qwen3_vl import qwen3_vl as Qwen3VL
+import importlib
+
+qwen_mod = importlib.import_module("src.qwen3_vl")
 
 
 def make_config(attrs: dict, name: str = "qwen3-vl") -> ComponentConfig:
@@ -36,9 +39,14 @@ def mock_llama():
     handler = MagicMock()
 
     with (
-        patch("src.qwen3_vl.hf_hub_download", side_effect=lambda **kw: f"/tmp/{kw['filename']}") as download,
+        patch(
+            "src.qwen3_vl.hf_hub_download",
+            side_effect=lambda **kw: f"/tmp/{kw['filename']}",
+        ) as download,
         patch("src.qwen3_vl.MTMDChatHandler", return_value=handler) as handler_cls,
         patch("src.qwen3_vl.Llama", return_value=llm) as llama_cls,
+        patch("src.qwen3_vl._quiet_llama_logs"),
+        patch("src.qwen3_vl.suppress_stdout_stderr"),
     ):
         yield download, handler_cls, llama_cls, llm
 
@@ -127,7 +135,7 @@ class TestGeneration:
         await service.get_classifications(make_jpeg_image(), 1)
         kwargs = service._test_llm.create_chat_completion.call_args.kwargs
         assert kwargs.get("temperature") == 0.0
-        assert kwargs.get("max_tokens") == 512
+        assert kwargs.get("max_tokens") == 128
 
 
 class TestClassifications:
@@ -135,8 +143,9 @@ class TestClassifications:
     async def test_default_question(self, service):
         with patch.object(service, "_generate", return_value="a red square") as gen:
             result = await service.get_classifications(make_jpeg_image(), 1)
-        assert result == [{"class_name": "a red square", "confidence": 1}]
-        assert gen.call_args[0][1] == "describe this image"
+        assert result[0].class_name == "a red square"
+        assert result[0].confidence == pytest.approx(1.0)
+        assert "describe this image" in gen.call_args[0][1]
 
     @pytest.mark.asyncio
     async def test_config_classification_prompt(self, mock_llama):
@@ -170,7 +179,7 @@ class TestClassifications:
             result = await service.get_classifications(
                 make_jpeg_image(), 1, extra={"question": "is there a person?"}
             )
-        assert result[0]["class_name"] == "yes"
+        assert result[0].class_name == "yes"
         assert gen.call_args[0][1] == "is there a person?"
 
     @pytest.mark.asyncio
@@ -181,13 +190,13 @@ class TestClassifications:
             ]
         }
         result = await service.get_classifications(make_jpeg_image(), 1)
-        assert result[0]["class_name"] == "final answer"
+        assert result[0].class_name == "final answer"
 
     @pytest.mark.asyncio
     async def test_from_camera(self, service):
         with patch.object(service, "_generate", return_value="from cam"):
             result = await service.get_classifications_from_camera("cam", 1)
-        assert result[0]["class_name"] == "from cam"
+        assert result[0].class_name == "from cam"
         service._test_camera.get_images.assert_awaited()
 
     @pytest.mark.asyncio
@@ -217,14 +226,24 @@ class TestDetections:
 
         prompt = gen.call_args[0][1]
         assert "Locate every object" in prompt
-        assert [d["class_name"] for d in result] == ["person", "chair"]
-        assert result[0]["x_min"] == 10
-        assert result[0]["y_min"] == 10
-        assert result[0]["x_max"] == 30
-        assert result[0]["y_max"] == 20
-        assert result[0]["x_min_normalized"] == pytest.approx(0.1)
-        assert result[1]["x_min"] == 50
-        assert result[1]["y_max"] == 45
+        assert "Report bbox coordinates in JSON format" in prompt
+        assert [d.class_name for d in result] == ["person", "chair"]
+        assert result[0].x_min == 10
+        assert result[0].y_min == 10
+        assert result[0].x_max == 30
+        assert result[0].y_max == 20
+        assert result[0].x_min_normalized == pytest.approx(0.1)
+        assert result[1].x_min == 50
+        assert result[1].y_max == 45
+
+    @pytest.mark.asyncio
+    async def test_parses_single_object_json(self, service):
+        # Official Qwen examples often return one object, not an array.
+        response = '{"bbox_2d": [100, 200, 300, 400], "label": "cup"}'
+        result = service._detections_from_response(response, 100, 50)
+        assert len(result) == 1
+        assert result[0].class_name == "cup"
+        assert result[0].x_min == 10
 
     @pytest.mark.asyncio
     async def test_query_limits_detection(self, service):
@@ -234,8 +253,8 @@ class TestDetections:
                 make_jpeg_image(), extra={"query": "people"}
             )
         prompt = gen.call_args[0][1]
-        assert "Locate all people" in prompt
-        assert result[0]["class_name"] == "person"
+        assert 'categories: "people"' in prompt
+        assert result[0].class_name == "person"
 
     @pytest.mark.asyncio
     async def test_strips_thinking_before_json(self, service):
@@ -246,15 +265,15 @@ class TestDetections:
         text = service._strip_thinking(response)
         result = service._detections_from_response(text, 100, 50)
         assert len(result) == 1
-        assert result[0]["class_name"] == "cup"
-        assert result[0]["x_max"] == 50
+        assert result[0].class_name == "cup"
+        assert result[0].x_max == 50
 
     @pytest.mark.asyncio
     async def test_parses_fenced_json(self, service):
         response = '```json\n[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]\n```'
         result = service._detections_from_response(response, 100, 50)
-        assert result[0]["class_name"] == "box"
-        assert result[0]["x_max"] == 100
+        assert result[0].class_name == "box"
+        assert result[0].x_max == 100
 
     @pytest.mark.asyncio
     async def test_empty_or_invalid_output(self, service):
@@ -291,6 +310,18 @@ class TestDetections:
         cam_a.get_images.assert_not_awaited()
 
 
+class TestImageResize:
+    def test_resize_for_inference_downscales(self):
+        img = Image.new("RGB", (1920, 1080), color="blue")
+        out = qwen_mod.resize_for_inference(img, 768)
+        assert max(out.size) == 768
+
+    def test_resize_for_inference_skips_small(self):
+        img = Image.new("RGB", (640, 480), color="blue")
+        out = qwen_mod.resize_for_inference(img, 768)
+        assert out.size == (640, 480)
+
+
 class TestPropertiesAndCaptureAll:
     @pytest.mark.asyncio
     async def test_properties(self, service):
@@ -317,8 +348,8 @@ class TestPropertiesAndCaptureAll:
             )
 
         assert result.image is not None
-        assert result.classifications[0]["class_name"] == "a scene"
-        assert result.detections[0]["class_name"] == "box"
+        assert result.classifications[0].class_name == "a scene"
+        assert result.detections[0].class_name == "box"
 
     @pytest.mark.asyncio
     async def test_capture_all_skips_unrequested(self, service):

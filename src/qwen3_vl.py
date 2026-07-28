@@ -1,6 +1,8 @@
 from typing import ClassVar, Mapping, Optional, Any, List, cast
 from typing_extensions import Self
+import ast
 import base64
+import ctypes
 import json
 import re
 from io import BytesIO
@@ -25,38 +27,66 @@ from viam.logging import getLogger
 
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
+from llama_cpp import llama_cpp
+from llama_cpp._utils import suppress_stdout_stderr
 from llama_cpp.llama_chat_format import MTMDChatHandler
+from PIL import Image
 
 LOGGER = getLogger(__name__)
 
 DEFAULT_MODEL_REPO = "Qwen/Qwen3-VL-2B-Instruct-GGUF"
 DEFAULT_MODEL_FILE = "Qwen3VL-2B-Instruct-Q4_K_M.gguf"
 DEFAULT_MMPROJ_FILE = "mmproj-Qwen3VL-2B-Instruct-F16.gguf"
-DEFAULT_CLASSIFICATION_PROMPT = "describe this image"
-DEFAULT_MAX_NEW_TOKENS = 512
+DEFAULT_CLASSIFICATION_PROMPT = "describe this image in one short sentence"
+DEFAULT_MAX_NEW_TOKENS = 128
 DEFAULT_DETECTION_MAX_NEW_TOKENS = 512
 DEFAULT_N_CTX = 4096
 DEFAULT_N_GPU_LAYERS = -1
+DEFAULT_MAX_IMAGE_SIDE = 768
 
 # Qwen3-VL grounding uses relative coordinates on a 0–1000 grid.
 BBOX_SCALE = 1000.0
 
+# Match Qwen3-VL 2D grounding cookbook phrasing.
 DETECTION_PROMPT_ALL = (
     "Locate every object in this image. "
-    'Output a JSON array only, where each item has keys "bbox_2d" and "label". '
-    '"bbox_2d" must be [x1, y1, x2, y2] integers in the range [0, 1000]. '
-    "Do not include explanations or code fences."
+    "Report bbox coordinates in JSON format."
 )
 
 DETECTION_PROMPT_QUERY = (
-    "Locate all {query} in this image. "
-    'Output a JSON array only, where each item has keys "bbox_2d" and "label". '
-    '"bbox_2d" must be [x1, y1, x2, y2] integers in the range [0, 1000]. '
-    "Do not include explanations or code fences."
+    'Locate every instance that belongs to the following categories: "{query}". '
+    "Report bbox coordinates in JSON format."
 )
 
 _THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
 _JSON_ARRAY_RE = re.compile(r"\[[\s\S]*\]")
+_JSON_OBJECT_RE = re.compile(r"\{[\s\S]*\}")
+
+_LOG_QUIETED = False
+
+
+@ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
+def _quiet_llama_log(level, text, user_data):  # noqa: ARG001
+    # llama.cpp prints progress/info to stderr by default; Viam treats that as errors.
+    return
+
+
+def _quiet_llama_logs() -> None:
+    global _LOG_QUIETED
+    if _LOG_QUIETED:
+        return
+    try:
+        llama_cpp.llama_log_set(_quiet_llama_log, ctypes.c_void_p(0))
+    except Exception:
+        LOGGER.debug("unable to install llama.cpp log callback", exc_info=True)
+    try:
+        if hasattr(llama_cpp, "mtmd_log_set"):
+            llama_cpp.mtmd_log_set(_quiet_llama_log, ctypes.c_void_p(0))
+        if hasattr(llama_cpp, "mtmd_helper_log_set"):
+            llama_cpp.mtmd_helper_log_set(_quiet_llama_log, ctypes.c_void_p(0))
+    except Exception:
+        LOGGER.debug("unable to install mtmd log callback", exc_info=True)
+    _LOG_QUIETED = True
 
 
 def resolve_gguf_path(repo_id: str, filename: str, local_path: str = "") -> str:
@@ -69,11 +99,41 @@ def resolve_gguf_path(repo_id: str, filename: str, local_path: str = "") -> str:
     return hf_hub_download(repo_id=repo_id, filename=filename)
 
 
+def resize_for_inference(pil_image, max_side: int):
+    """Downscale large camera frames; vision encode dominates latency."""
+    if max_side <= 0:
+        return pil_image.convert("RGB")
+    image = pil_image.convert("RGB")
+    width, height = image.size
+    longest = max(width, height)
+    if longest <= max_side:
+        return image
+    scale = max_side / float(longest)
+    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    return image.resize(new_size, Image.Resampling.BILINEAR)
+
+
 def pil_to_data_uri(pil_image) -> str:
     buf = BytesIO()
-    pil_image.convert("RGB").save(buf, format="JPEG")
+    pil_image.save(buf, format="JPEG", quality=85)
     encoded = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/jpeg;base64,{encoded}"
+
+
+def strip_markdown_json(text: str) -> str:
+    cleaned = text.strip()
+    if "```json" in cleaned:
+        cleaned = cleaned.split("```json", 1)[1]
+        cleaned = cleaned.split("```", 1)[0]
+    elif cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        lines = cleaned.splitlines()
+        if lines and lines[0].strip().lower() in ("json", ""):
+            lines = lines[1:]
+        cleaned = "\n".join(lines).strip()
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
+    return cleaned.strip()
 
 
 class qwen3_vl(Vision, Reconfigurable):
@@ -88,6 +148,7 @@ class qwen3_vl(Vision, Reconfigurable):
     classification_prompt: str
     max_new_tokens: int
     detection_max_new_tokens: int
+    max_image_side: int
     do_sample: bool
     temperature: float
     top_p: float
@@ -133,6 +194,10 @@ class qwen3_vl(Vision, Reconfigurable):
                 fields["detection_max_new_tokens"].number_value
             )
 
+        self.max_image_side = DEFAULT_MAX_IMAGE_SIDE
+        if "max_image_side" in fields:
+            self.max_image_side = int(fields["max_image_side"].number_value)
+
         self.do_sample = False
         if "do_sample" in fields:
             self.do_sample = fields["do_sample"].bool_value
@@ -166,19 +231,23 @@ class qwen3_vl(Vision, Reconfigurable):
         resolved_model = resolve_gguf_path(repo_id, model_file, model_path)
         resolved_mmproj = resolve_gguf_path(repo_id, mmproj_file, mmproj_path)
 
+        _quiet_llama_logs()
         LOGGER.info(
             "loading Qwen3-VL GGUF via llama.cpp "
             f"(model={resolved_model}, mmproj={resolved_mmproj}, "
             f"n_gpu_layers={n_gpu_layers}, n_ctx={n_ctx})"
         )
-        chat_handler = MTMDChatHandler(clip_model_path=resolved_mmproj, verbose=False)
-        self.llm = Llama(
-            model_path=resolved_model,
-            chat_handler=chat_handler,
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-            verbose=False,
-        )
+        with suppress_stdout_stderr(disable=False):
+            chat_handler = MTMDChatHandler(
+                clip_model_path=resolved_mmproj, verbose=False
+            )
+            self.llm = Llama(
+                model_path=resolved_model,
+                chat_handler=chat_handler,
+                n_ctx=n_ctx,
+                n_gpu_layers=n_gpu_layers,
+                verbose=False,
+            )
         return
 
     async def get_cam_image(self, camera_name: str) -> ViamImage:
@@ -199,6 +268,11 @@ class qwen3_vl(Vision, Reconfigurable):
         if match:
             return text[match.end() :].strip()
         return text.strip()
+
+    def _prepare_image(self, image: ViamImage):
+        return resize_for_inference(
+            viam_to_pil_image(image), self.max_image_side
+        )
 
     def _generate(
         self,
@@ -221,61 +295,82 @@ class qwen3_vl(Vision, Reconfigurable):
             }
         ]
 
+        gen_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "max_tokens": max_new_tokens,
+        }
         if greedy or not self.do_sample:
-            completion = self.llm.create_chat_completion(
-                messages=messages,
-                max_tokens=max_new_tokens,
-                temperature=0.0,
-            )
+            gen_kwargs["temperature"] = 0.0
         else:
-            completion = self.llm.create_chat_completion(
-                messages=messages,
-                max_tokens=max_new_tokens,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                top_k=self.top_k,
-            )
+            gen_kwargs["temperature"] = self.temperature
+            gen_kwargs["top_p"] = self.top_p
+            gen_kwargs["top_k"] = self.top_k
+
+        with suppress_stdout_stderr(disable=False):
+            completion = self.llm.create_chat_completion(**gen_kwargs)
 
         content = completion["choices"][0]["message"].get("content") or ""
         return self._strip_thinking(content)
 
-    def _parse_json_array(self, text: str) -> List[Any]:
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`")
-            lines = cleaned.splitlines()
-            if lines and lines[0].strip().lower() in ("json", ""):
-                lines = lines[1:]
-            cleaned = "\n".join(lines).strip()
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3].strip()
+    def _loads_jsonish(self, text: str) -> Any:
+        cleaned = strip_markdown_json(text)
+        for candidate in (cleaned,):
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+            try:
+                return ast.literal_eval(candidate)
+            except (SyntaxError, ValueError):
+                pass
 
-        try:
-            parsed = json.loads(cleaned)
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
-            pass
+        for pattern in (_JSON_ARRAY_RE, _JSON_OBJECT_RE):
+            match = pattern.search(cleaned)
+            if not match:
+                continue
+            snippet = match.group(0)
+            try:
+                return json.loads(snippet)
+            except json.JSONDecodeError:
+                pass
+            try:
+                return ast.literal_eval(snippet)
+            except (SyntaxError, ValueError):
+                pass
+        return None
 
-        match = _JSON_ARRAY_RE.search(cleaned)
-        if not match:
-            LOGGER.warning(f"no JSON array found in model output: {text!r}")
+    def _parse_detection_items(self, text: str) -> List[dict]:
+        parsed = self._loads_jsonish(text)
+        if parsed is None:
+            LOGGER.warning(f"no JSON detections found in model output: {text!r}")
             return []
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            LOGGER.warning(f"failed to parse JSON array from model output: {text!r}")
+
+        if isinstance(parsed, dict):
+            # Single object or {"detections":[...]} / {"objects":[...]} wrappers.
+            for key in ("detections", "objects", "items", "results"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    parsed = value
+                    break
+            else:
+                parsed = [parsed]
+
+        if not isinstance(parsed, list):
+            LOGGER.warning(f"unexpected detection JSON type: {type(parsed)}")
             return []
-        return parsed if isinstance(parsed, list) else []
+
+        items: List[dict] = []
+        for item in parsed:
+            if isinstance(item, dict):
+                items.append(item)
+        return items
 
     def _detections_from_response(
         self, text: str, width: int, height: int
     ) -> List[Detection]:
         detections: List[Detection] = []
-        for item in self._parse_json_array(text):
-            if not isinstance(item, dict):
-                continue
-            bbox = item.get("bbox_2d")
+        for item in self._parse_detection_items(text):
+            bbox = item.get("bbox_2d") or item.get("bbox") or item.get("box_2d")
             if not isinstance(bbox, list) or len(bbox) != 4:
                 continue
             try:
@@ -283,35 +378,46 @@ class qwen3_vl(Vision, Reconfigurable):
             except (TypeError, ValueError):
                 continue
 
+            # Values may already be normalized [0,1] instead of [0,1000].
+            if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5:
+                x1, y1, x2, y2 = (
+                    x1 * BBOX_SCALE,
+                    y1 * BBOX_SCALE,
+                    x2 * BBOX_SCALE,
+                    y2 * BBOX_SCALE,
+                )
+
             x1 = max(0.0, min(BBOX_SCALE, x1))
             y1 = max(0.0, min(BBOX_SCALE, y1))
             x2 = max(0.0, min(BBOX_SCALE, x2))
             y2 = max(0.0, min(BBOX_SCALE, y2))
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
 
             x_min_n = x1 / BBOX_SCALE
             y_min_n = y1 / BBOX_SCALE
             x_max_n = x2 / BBOX_SCALE
             y_max_n = y2 / BBOX_SCALE
 
-            label = item.get("label", "")
-            if label is None:
-                label = ""
-            elif not isinstance(label, str):
+            label = item.get("label") or item.get("class_name") or item.get("name") or ""
+            if not isinstance(label, str):
                 label = str(label)
 
             detections.append(
-                {
-                    "x_min": int(round(x_min_n * width)),
-                    "y_min": int(round(y_min_n * height)),
-                    "x_max": int(round(x_max_n * width)),
-                    "y_max": int(round(y_max_n * height)),
-                    "x_min_normalized": x_min_n,
-                    "y_min_normalized": y_min_n,
-                    "x_max_normalized": x_max_n,
-                    "y_max_normalized": y_max_n,
-                    "confidence": 1,
-                    "class_name": label,
-                }
+                Detection(
+                    x_min=int(round(x_min_n * width)),
+                    y_min=int(round(y_min_n * height)),
+                    x_max=int(round(x_max_n * width)),
+                    y_max=int(round(y_max_n * height)),
+                    x_min_normalized=x_min_n,
+                    y_min_normalized=y_min_n,
+                    x_max_normalized=x_max_n,
+                    y_max_normalized=y_max_n,
+                    confidence=1.0,
+                    class_name=label,
+                )
             )
         return detections
 
@@ -338,7 +444,7 @@ class qwen3_vl(Vision, Reconfigurable):
         extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> List[Detection]:
-        pil_image = viam_to_pil_image(image)
+        pil_image = self._prepare_image(image)
         query = extra.get("query") if extra else None
         prompt = self._detection_prompt(query)
         max_tokens = self.detection_max_new_tokens
@@ -347,7 +453,10 @@ class qwen3_vl(Vision, Reconfigurable):
         text = self._generate(
             pil_image, prompt, max_new_tokens=max_tokens, greedy=True
         )
-        width, height = pil_image.size
+        LOGGER.debug(f"detection raw model output: {text!r}")
+        # Map boxes onto the original camera frame, not the resized inference image.
+        original = viam_to_pil_image(image)
+        width, height = original.size
         return self._detections_from_response(text, width, height)
 
     async def get_classifications_from_camera(
@@ -377,9 +486,9 @@ class qwen3_vl(Vision, Reconfigurable):
         if extra is not None and extra.get("max_new_tokens") is not None:
             max_tokens = int(extra["max_new_tokens"])
         answer = self._generate(
-            viam_to_pil_image(image), question, max_new_tokens=max_tokens
+            self._prepare_image(image), question, max_new_tokens=max_tokens
         )
-        return [{"class_name": answer, "confidence": 1}]
+        return [Classification(class_name=answer, confidence=1.0)]
 
     async def get_object_point_clouds(
         self,
@@ -388,12 +497,12 @@ class qwen3_vl(Vision, Reconfigurable):
         extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> List[PointCloudObject]:
-        return
+        return []
 
     async def do_command(
         self, command: Mapping[str, ValueTypes], *, timeout: Optional[float] = None
     ) -> Mapping[str, ValueTypes]:
-        return
+        return {}
 
     async def capture_all_from_camera(
         self,

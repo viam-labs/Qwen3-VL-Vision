@@ -60,8 +60,9 @@ On the new service panel, copy and paste the following attribute template into y
 | `n_gpu_layers` | number | Optional | Layers to offload to GPU/Metal (`-1` = all, default). Use `0` for CPU-only. |
 | `n_ctx` | number | Optional | Context window (default `4096`). |
 | `classification_prompt` | string | Optional | Default classification question (`describe this image`). |
-| `max_new_tokens` | number | Optional | Max tokens for classification (default `512`). |
+| `max_new_tokens` | number | Optional | Max tokens for classification (default `128`). |
 | `detection_max_new_tokens` | number | Optional | Max tokens for detection JSON (default `512`). |
+| `max_image_side` | number | Optional | Longest image side in pixels before inference (default `768`). Lower is faster. |
 | `do_sample` | bool | Optional | Enable sampling for classifications (default `false`). Detections are always greedy. |
 | `temperature` | number | Optional | Sampling temperature when `do_sample` is true (default `0.7`). |
 | `top_p` | number | Optional | Nucleus sampling when `do_sample` is true (default `0.8`). |
