@@ -2,7 +2,6 @@ from typing import ClassVar, Mapping, Optional, Any, List, cast
 from typing_extensions import Self
 import base64
 import json
-import os
 import re
 from io import BytesIO
 from pathlib import Path
