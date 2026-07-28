@@ -7,7 +7,7 @@ It runs [Qwen3.5-0.8B GGUF](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF) lo
 Defaults (tuned for speed):
 - LLM: `Qwen3.5-0.8B-Q4_K_M.gguf` (~530MB)
 - Vision projector: `mmproj-F16.gguf` (~205MB)
-- Image longest side: `512`
+- Image longest side: `512` (classifications), `1024` (detections)
 - Context: `2048`
 - Accelerator: **Metal** on macOS, **CUDA** when `nvidia-smi` is present, otherwise CPU
 
@@ -62,7 +62,8 @@ On the new service panel, copy and paste the following attribute template into y
 | `classification_prompt` | string | Optional | Default classification question. Asks for a 2–3 sentence scene description by default. |
 | `max_new_tokens` | number | Optional | Max tokens for classification (default `256`). |
 | `detection_max_new_tokens` | number | Optional | Max tokens for detection JSON (default `512`). |
-| `max_image_side` | number | Optional | Longest image side in pixels before inference (default `512`). Lower is faster. |
+| `max_image_side` | number | Optional | Longest image side for classifications (default `512`). Lower is faster. |
+| `detection_max_image_side` | number | Optional | Longest image side for detections (default `1024`). Higher improves box accuracy. If only `max_image_side` is set, detections use that value too. |
 | `auto_label` | bool | Optional | Moondream-style list-then-ground. Default `true`. Set `false` for a faster single-pass over a fixed category list. Overridable via `extra.auto_label`. |
 | `do_sample` | bool | Optional | Enable sampling for classifications (default `false`). Detections are always greedy. |
 | `temperature` | number | Optional | Sampling temperature when `do_sample` is true (default `0.7`). |

@@ -46,8 +46,10 @@ DEFAULT_MAX_NEW_TOKENS = 256
 DEFAULT_DETECTION_MAX_NEW_TOKENS = 512
 DEFAULT_N_CTX = 2048
 DEFAULT_N_GPU_LAYERS = -1
-# Smaller frames = faster vision encode on phones / edge devices.
+# Classification can stay smaller; grounding needs more vision tokens.
 DEFAULT_MAX_IMAGE_SIDE = 512
+# llama.cpp Qwen VL grounding is much more accurate around 1k–2k image tokens.
+DEFAULT_DETECTION_MAX_IMAGE_SIDE = 1024
 # Cap listed objects so list-then-ground stays responsive on edge devices.
 MAX_AUTO_DETECT_OBJECTS = 12
 MAX_PER_OBJECT_GROUND = 6
@@ -131,12 +133,13 @@ def resize_for_inference(pil_image, max_side: int):
         return image
     scale = max_side / float(longest)
     new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
-    return image.resize(new_size, Image.Resampling.BILINEAR)
+    # Bicubic matches Qwen / llama.cpp vision preprocessing better than bilinear.
+    return image.resize(new_size, Image.Resampling.BICUBIC)
 
 
 def pil_to_data_uri(pil_image) -> str:
     buf = BytesIO()
-    pil_image.save(buf, format="JPEG", quality=85)
+    pil_image.save(buf, format="JPEG", quality=92)
     encoded = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/jpeg;base64,{encoded}"
 
@@ -170,6 +173,7 @@ class qwen(Vision, Reconfigurable):
     max_new_tokens: int
     detection_max_new_tokens: int
     max_image_side: int
+    detection_max_image_side: int
     auto_label: bool
     do_sample: bool
     temperature: float
@@ -219,6 +223,16 @@ class qwen(Vision, Reconfigurable):
         self.max_image_side = DEFAULT_MAX_IMAGE_SIDE
         if "max_image_side" in fields:
             self.max_image_side = int(fields["max_image_side"].number_value)
+
+        # Higher res for grounding; falls back to max_image_side when unset.
+        self.detection_max_image_side = DEFAULT_DETECTION_MAX_IMAGE_SIDE
+        if "detection_max_image_side" in fields:
+            self.detection_max_image_side = int(
+                fields["detection_max_image_side"].number_value
+            )
+        elif "max_image_side" in fields:
+            # If user only set max_image_side, use it for detections too.
+            self.detection_max_image_side = self.max_image_side
 
         # Moondream-style list-then-ground. On by default (0.8B is fast enough).
         self.auto_label = True
@@ -296,10 +310,12 @@ class qwen(Vision, Reconfigurable):
             return text[match.end() :].strip()
         return text.strip()
 
-    def _prepare_image(self, image: ViamImage):
-        return resize_for_inference(
-            viam_to_pil_image(image), self.max_image_side
-        )
+    def _prepare_image(self, image: ViamImage, max_side: Optional[int] = None):
+        side = self.max_image_side if max_side is None else max_side
+        return resize_for_inference(viam_to_pil_image(image), side)
+
+    def _prepare_detection_image(self, image: ViamImage):
+        return self._prepare_image(image, self.detection_max_image_side)
 
     def _generate(
         self,
@@ -393,7 +409,13 @@ class qwen(Vision, Reconfigurable):
         return items
 
     def _detections_from_response(
-        self, text: str, width: int, height: int
+        self,
+        text: str,
+        width: int,
+        height: int,
+        *,
+        infer_width: Optional[int] = None,
+        infer_height: Optional[int] = None,
     ) -> List[Detection]:
         detections: List[Detection] = []
         for item in self._parse_detection_items(text):
@@ -405,14 +427,26 @@ class qwen(Vision, Reconfigurable):
             except (TypeError, ValueError):
                 continue
 
-            # Values may already be normalized [0,1] instead of [0,1000].
-            if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5:
+            mx = max(abs(x1), abs(y1), abs(x2), abs(y2))
+            if mx <= 1.5:
+                # Already normalized [0,1].
                 x1, y1, x2, y2 = (
                     x1 * BBOX_SCALE,
                     y1 * BBOX_SCALE,
                     x2 * BBOX_SCALE,
                     y2 * BBOX_SCALE,
                 )
+            elif (
+                infer_width
+                and infer_height
+                and mx > BBOX_SCALE + 1
+                and mx <= max(infer_width, infer_height) * 1.05
+            ):
+                # Absolute pixels on the inference image (Qwen2.5-VL style).
+                x1 = x1 / float(infer_width) * BBOX_SCALE
+                y1 = y1 / float(infer_height) * BBOX_SCALE
+                x2 = x2 / float(infer_width) * BBOX_SCALE
+                y2 = y2 / float(infer_height) * BBOX_SCALE
 
             x1 = max(0.0, min(BBOX_SCALE, x1))
             y1 = max(0.0, min(BBOX_SCALE, y1))
@@ -508,7 +542,14 @@ class qwen(Vision, Reconfigurable):
             pil_image, prompt, max_new_tokens=max_tokens, greedy=True
         )
         LOGGER.debug(f"detection raw model output: {text!r}")
-        return self._detections_from_response(text, width, height)
+        infer_w, infer_h = pil_image.size
+        return self._detections_from_response(
+            text,
+            width,
+            height,
+            infer_width=infer_w,
+            infer_height=infer_h,
+        )
 
     async def get_detections_from_camera(
         self,
@@ -531,7 +572,8 @@ class qwen(Vision, Reconfigurable):
         # Default (auto_label): moondream-style list objects, then ground those
         # categories. extra.query filters the list ("people", "vehicles", …).
         # auto_label=false: single-pass category grounding (fixed list or query).
-        pil_image = self._prepare_image(image)
+        # Use a larger frame for grounding — low vision token counts make boxes coarse.
+        pil_image = self._prepare_detection_image(image)
         original = viam_to_pil_image(image)
         width, height = original.size
         query = extra.get("query") if extra else None

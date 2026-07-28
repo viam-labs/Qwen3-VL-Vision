@@ -254,6 +254,19 @@ class TestDetections:
         assert result[0].x_min == 10
 
     @pytest.mark.asyncio
+    async def test_absolute_pixel_bbox_above_1000(self, service):
+        # Absolute pixels larger than the 0–1000 relative grid.
+        response = '[{"bbox_2d": [100, 50, 1500, 800], "label": "cup"}]'
+        result = service._detections_from_response(
+            response, 400, 200, infer_width=2000, infer_height=1000
+        )
+        assert len(result) == 1
+        assert result[0].x_min == 20
+        assert result[0].y_min == 10
+        assert result[0].x_max == 300
+        assert result[0].y_max == 160
+
+    @pytest.mark.asyncio
     async def test_query_filters_listing(self, service):
         response = '[{"bbox_2d": [0, 0, 1000, 1000], "label": "person"}]'
         with (
