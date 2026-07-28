@@ -1,15 +1,15 @@
-# Qwen3-VL modular vision service
+# Qwen3.5 modular vision service
 
 This module implements the [rdk vision API](https://github.com/rdk/vision-api) in a `viam-labs:vision:qwen3-vl` model.
 
-It runs [Qwen3-VL-2B-Instruct GGUF](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF) locally via [llama.cpp](https://github.com/ggerganov/llama.cpp) / [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) for image classification / Q&A and open-vocabulary object detection (`bbox_2d` grounding).
+It runs [Qwen3.5-0.8B GGUF](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF) locally via [llama.cpp](https://github.com/ggerganov/llama.cpp) / [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) for fast image classification / Q&A and object detection (`bbox_2d` grounding) on mobile and edge devices.
 
-Defaults:
-- LLM: `Qwen3VL-2B-Instruct-Q4_K_M.gguf`
-- Vision projector: `mmproj-Qwen3VL-2B-Instruct-F16.gguf`
+Defaults (tuned for speed):
+- LLM: `Qwen3.5-0.8B-Q4_K_M.gguf` (~530MB)
+- Vision projector: `mmproj-F16.gguf` (~205MB)
+- Image longest side: `512`
+- Context: `2048`
 - Accelerator: **Metal** on macOS, **CUDA** when `nvidia-smi` is present, otherwise CPU
-
-This is much faster on Apple Silicon than the previous PyTorch/Transformers path.
 
 ## Build and Run
 
@@ -52,17 +52,17 @@ On the new service panel, copy and paste the following attribute template into y
 | Name | Type | Inclusion | Description |
 | ---- | ---- | --------- | ----------- |
 | `camera` | string | **Required** | Default camera dependency for the service. |
-| `model_repo` | string | Optional | Hugging Face GGUF repo. Default `Qwen/Qwen3-VL-2B-Instruct-GGUF`. |
-| `model_file` | string | Optional | LLM GGUF filename. Default `Qwen3VL-2B-Instruct-Q4_K_M.gguf`. |
-| `mmproj_file` | string | Optional | Vision projector GGUF. Default `mmproj-Qwen3VL-2B-Instruct-F16.gguf`. |
+| `model_repo` | string | Optional | Hugging Face GGUF repo. Default `unsloth/Qwen3.5-0.8B-GGUF`. |
+| `model_file` | string | Optional | LLM GGUF filename. Default `Qwen3.5-0.8B-Q4_K_M.gguf`. |
+| `mmproj_file` | string | Optional | Vision projector GGUF. Default `mmproj-F16.gguf`. |
 | `model_path` | string | Optional | Local path to LLM GGUF (skips Hub download for the model). |
 | `mmproj_path` | string | Optional | Local path to mmproj GGUF (skips Hub download for mmproj). |
 | `n_gpu_layers` | number | Optional | Layers to offload to GPU/Metal (`-1` = all, default). Use `0` for CPU-only. |
-| `n_ctx` | number | Optional | Context window (default `4096`). |
+| `n_ctx` | number | Optional | Context window (default `2048`). |
 | `classification_prompt` | string | Optional | Default classification question. Asks for a 2–3 sentence scene description by default. |
 | `max_new_tokens` | number | Optional | Max tokens for classification (default `256`). |
 | `detection_max_new_tokens` | number | Optional | Max tokens for detection JSON (default `512`). |
-| `max_image_side` | number | Optional | Longest image side in pixels before inference (default `768`). Lower is faster. |
+| `max_image_side` | number | Optional | Longest image side in pixels before inference (default `512`). Lower is faster. |
 | `auto_label` | bool | Optional | If `true`, list objects then ground those categories (~2x slower, open-vocab). Default `false` (single pass over a common category list). Overridable via `extra.auto_label`. |
 | `do_sample` | bool | Optional | Enable sampling for classifications (default `false`). Detections are always greedy. |
 | `temperature` | number | Optional | Sampling temperature when `do_sample` is true (default `0.7`). |
@@ -71,7 +71,7 @@ On the new service panel, copy and paste the following attribute template into y
 
 ### Example Configurations
 
-Default Q4_K_M on Metal/CUDA:
+Default Qwen3.5-0.8B Q4_K_M (fast / mobile):
 
 ```json
 {
@@ -79,13 +79,27 @@ Default Q4_K_M on Metal/CUDA:
 }
 ```
 
-Higher-quality Q8 quant:
+Higher-quality Qwen3.5-2B:
 
 ```json
 {
   "camera": "cam",
-  "model_file": "Qwen3VL-2B-Instruct-Q8_0.gguf",
-  "mmproj_file": "mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf"
+  "model_repo": "unsloth/Qwen3.5-2B-GGUF",
+  "model_file": "Qwen3.5-2B-Q4_K_M.gguf",
+  "mmproj_file": "mmproj-F16.gguf",
+  "max_image_side": 768,
+  "n_ctx": 4096
+}
+```
+
+Previous Qwen3-VL-2B Instruct:
+
+```json
+{
+  "camera": "cam",
+  "model_repo": "Qwen/Qwen3-VL-2B-Instruct-GGUF",
+  "model_file": "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+  "mmproj_file": "mmproj-Qwen3VL-2B-Instruct-F16.gguf"
 }
 ```
 
@@ -108,4 +122,4 @@ Override the prompt with `extra={"question": "..."}`.
 
 Asks for JSON `{"bbox_2d": [x1,y1,x2,y2], "label": "..."}` on the 0–1000 grid, then converts to Viam detections.
 
-By default this uses **one** vision pass grounding a fixed common-category list (person, chair, laptop, etc.) — the style Qwen3-VL follows reliably. Pass `extra={"query": "person, chair, laptop"}` for your own classes in one pass, or set `"auto_label": true` to list objects first then ground them (~2x slower, fully open-vocab).
+By default this uses **one** vision pass grounding a fixed common-category list (person, chair, laptop, etc.). Pass `extra={"query": "person, chair, laptop"}` for your own classes in one pass, or set `"auto_label": true` to list objects first then ground them (~2x slower, fully open-vocab).

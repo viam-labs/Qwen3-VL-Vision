@@ -83,12 +83,12 @@ class TestReconfigure:
         assert download.call_count == 2
         filenames = {c.kwargs["filename"] for c in download.call_args_list}
         assert filenames == {
-            "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
-            "mmproj-Qwen3VL-2B-Instruct-F16.gguf",
+            "Qwen3.5-0.8B-Q4_K_M.gguf",
+            "mmproj-F16.gguf",
         }
         assert handler_cls.called
         assert llama_cls.call_args.kwargs["n_gpu_layers"] == -1
-        assert llama_cls.call_args.kwargs["n_ctx"] == 4096
+        assert llama_cls.call_args.kwargs["n_ctx"] == 2048
 
     def test_custom_files(self, mock_llama):
         download, _, llama_cls, _ = mock_llama
@@ -97,19 +97,19 @@ class TestReconfigure:
             make_config(
                 {
                     "camera": "cam",
-                    "model_repo": "Qwen/Qwen3-VL-2B-Instruct-GGUF",
-                    "model_file": "Qwen3VL-2B-Instruct-Q8_0.gguf",
-                    "mmproj_file": "mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf",
+                    "model_repo": "unsloth/Qwen3.5-2B-GGUF",
+                    "model_file": "Qwen3.5-2B-Q4_K_M.gguf",
+                    "mmproj_file": "mmproj-F16.gguf",
                     "n_gpu_layers": 20,
-                    "n_ctx": 2048,
+                    "n_ctx": 4096,
                 }
             ),
             {Camera.get_resource_name("cam"): cam},
         )
         filenames = {c.kwargs["filename"] for c in download.call_args_list}
-        assert "Qwen3VL-2B-Instruct-Q8_0.gguf" in filenames
+        assert "Qwen3.5-2B-Q4_K_M.gguf" in filenames
         assert llama_cls.call_args.kwargs["n_gpu_layers"] == 20
-        assert llama_cls.call_args.kwargs["n_ctx"] == 2048
+        assert llama_cls.call_args.kwargs["n_ctx"] == 4096
 
     def test_missing_camera_dependency(self, mock_llama):
         with pytest.raises(Exception, match="camera dependency"):

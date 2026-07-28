@@ -34,24 +34,26 @@ from PIL import Image
 
 LOGGER = getLogger(__name__)
 
-DEFAULT_MODEL_REPO = "Qwen/Qwen3-VL-2B-Instruct-GGUF"
-DEFAULT_MODEL_FILE = "Qwen3VL-2B-Instruct-Q4_K_M.gguf"
-DEFAULT_MMPROJ_FILE = "mmproj-Qwen3VL-2B-Instruct-F16.gguf"
+# Qwen3.5-0.8B is natively multimodal and much faster on mobile / edge devices.
+DEFAULT_MODEL_REPO = "unsloth/Qwen3.5-0.8B-GGUF"
+DEFAULT_MODEL_FILE = "Qwen3.5-0.8B-Q4_K_M.gguf"
+DEFAULT_MMPROJ_FILE = "mmproj-F16.gguf"
 DEFAULT_CLASSIFICATION_PROMPT = (
     "Describe this image in 2-3 sentences. Cover the overall scene, "
     "notable people or objects, and any important details or actions."
 )
 DEFAULT_MAX_NEW_TOKENS = 256
 DEFAULT_DETECTION_MAX_NEW_TOKENS = 512
-DEFAULT_N_CTX = 4096
+DEFAULT_N_CTX = 2048
 DEFAULT_N_GPU_LAYERS = -1
-DEFAULT_MAX_IMAGE_SIDE = 768
+# Smaller frames = faster vision encode on phones / edge devices.
+DEFAULT_MAX_IMAGE_SIDE = 512
 
-# Qwen3-VL grounding uses relative coordinates on a 0–1000 grid.
+# Qwen3.5 / Qwen3-VL grounding uses relative coordinates on a 0–1000 grid.
 BBOX_SCALE = 1000.0
 
-# Vague "detect everything" prompts often return prose or empty JSON on 2B.
-# Cookbook-style category grounding is what this model follows reliably.
+# Vague "detect everything" prompts often return prose or empty JSON on small models.
+# Cookbook-style category grounding is what Qwen VL follows reliably.
 # Common indoor / desk / street classes for a useful single-pass default.
 DEFAULT_DETECTION_CATEGORIES = (
     "person, man, woman, child, chair, table, sofa, desk, bed, laptop, "
@@ -151,7 +153,7 @@ def strip_markdown_json(text: str) -> str:
 
 class qwen3_vl(Vision, Reconfigurable):
     """
-    Vision service backed by Qwen3-VL GGUF via llama.cpp (Metal / CUDA / CPU).
+    Vision service backed by Qwen3.5 GGUF via llama.cpp (Metal / CUDA / CPU).
     """
 
     MODEL: ClassVar[Model] = Model(ModelFamily("viam-labs", "vision"), "qwen3-vl")
@@ -252,7 +254,7 @@ class qwen3_vl(Vision, Reconfigurable):
 
         _quiet_llama_logs()
         LOGGER.info(
-            "loading Qwen3-VL GGUF via llama.cpp "
+            "loading Qwen3.5 GGUF via llama.cpp "
             f"(model={resolved_model}, mmproj={resolved_mmproj}, "
             f"n_gpu_layers={n_gpu_layers}, n_ctx={n_ctx})"
         )

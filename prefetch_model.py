@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download default Qwen3-VL GGUF weights into the Hugging Face cache."""
+"""Download default Qwen3.5 GGUF weights into the Hugging Face cache."""
 
 import os
 import sys
@@ -7,9 +7,9 @@ import sys
 from huggingface_hub import hf_hub_download
 
 # Keep in sync with src/qwen3_vl.py defaults
-DEFAULT_MODEL_REPO = "Qwen/Qwen3-VL-2B-Instruct-GGUF"
-DEFAULT_MODEL_FILE = "Qwen3VL-2B-Instruct-Q4_K_M.gguf"
-DEFAULT_MMPROJ_FILE = "mmproj-Qwen3VL-2B-Instruct-F16.gguf"
+DEFAULT_MODEL_REPO = "unsloth/Qwen3.5-0.8B-GGUF"
+DEFAULT_MODEL_FILE = "Qwen3.5-0.8B-Q4_K_M.gguf"
+DEFAULT_MMPROJ_FILE = "mmproj-F16.gguf"
 
 
 def main() -> int:
