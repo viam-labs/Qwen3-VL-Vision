@@ -48,23 +48,29 @@ DEFAULT_N_CTX = 2048
 DEFAULT_N_GPU_LAYERS = -1
 # Smaller frames = faster vision encode on phones / edge devices.
 DEFAULT_MAX_IMAGE_SIDE = 512
+# Cap listed objects so list-then-ground stays responsive on edge devices.
+MAX_AUTO_DETECT_OBJECTS = 12
+MAX_PER_OBJECT_GROUND = 6
 
 # Qwen3.5 / Qwen3-VL grounding uses relative coordinates on a 0–1000 grid.
 BBOX_SCALE = 1000.0
 
-# Vague "detect everything" prompts often return prose or empty JSON on small models.
-# Cookbook-style category grounding is what Qwen VL follows reliably.
-# Common indoor / desk / street classes for a useful single-pass default.
+# Fallback single-pass categories when auto_label is disabled.
 DEFAULT_DETECTION_CATEGORIES = (
     "person, man, woman, child, chair, table, sofa, desk, bed, laptop, "
     "monitor, keyboard, mouse, phone, bottle, cup, mug, book, bag, backpack, "
     "plant, lamp, door, window, tv, remote, glasses, headphones, car, bicycle"
 )
 
+# Moondream-style listing prompts (comma-separated names only).
 LIST_OBJECTS_PROMPT = (
-    "List all distinct visible objects in this image. "
-    "Include people, furniture, electronics, clothing, and other items. "
-    "Return a simple comma-separated list of object names only, with no extra text."
+    "List all the objects you can see in this image. "
+    "Return your answer as a simple comma-separated list of object names."
+)
+
+LIST_OBJECTS_QUERY_PROMPT = (
+    "List all {query} you can see in this image. "
+    "Return your answer as a simple comma-separated list of object names."
 )
 
 DETECTION_PROMPT_QUERY = (
@@ -214,8 +220,8 @@ class qwen(Vision, Reconfigurable):
         if "max_image_side" in fields:
             self.max_image_side = int(fields["max_image_side"].number_value)
 
-        # Two-pass list-then-ground. More recall, roughly 2x slower. Off by default.
-        self.auto_label = False
+        # Moondream-style list-then-ground. On by default (0.8B is fast enough).
+        self.auto_label = True
         if "auto_label" in fields:
             self.auto_label = fields["auto_label"].bool_value
 
@@ -442,10 +448,16 @@ class qwen(Vision, Reconfigurable):
             )
         return detections
 
-    def _list_object_names(self, pil_image) -> List[str]:
-        """Ask for a comma-separated object list, then ground those categories."""
+    def _list_object_names(
+        self, pil_image, query: Optional[str] = None
+    ) -> List[str]:
+        """Ask for a comma-separated object list (moondream auto-label style)."""
+        if query and str(query).strip():
+            prompt = LIST_OBJECTS_QUERY_PROMPT.format(query=str(query).strip())
+        else:
+            prompt = LIST_OBJECTS_PROMPT
         answer = self._generate(
-            pil_image, LIST_OBJECTS_PROMPT, max_new_tokens=128, greedy=True
+            pil_image, prompt, max_new_tokens=128, greedy=True
         )
         # Models sometimes return "a, b, and c" or bullet lines.
         cleaned = answer.replace("\n", ",")
@@ -455,17 +467,21 @@ class qwen(Vision, Reconfigurable):
             name = part.strip().strip(".-•*").strip()
             if name.lower().startswith("and "):
                 name = name[4:].strip()
-            if not name:
+            # Drop prose / numbered leftovers from small models.
+            if not name or len(name) > 40:
                 continue
+            if name[:1].isdigit() and ". " in name[:4]:
+                name = name.split(". ", 1)[1].strip()
             key = name.lower()
             if key in seen:
                 continue
             seen.add(key)
             names.append(name)
+            if len(names) >= MAX_AUTO_DETECT_OBJECTS:
+                break
         return names
 
     def _detection_prompt(self, query: Optional[str] = None) -> str:
-        # Always use category grounding; open-vocab prose prompts under-fire on 2B.
         categories = (
             str(query).strip()
             if query and str(query).strip()
@@ -477,6 +493,22 @@ class qwen(Vision, Reconfigurable):
         if extra is not None and "auto_label" in extra:
             return bool(extra["auto_label"])
         return self.auto_label
+
+    def _ground_categories(
+        self,
+        pil_image,
+        categories: str,
+        *,
+        max_tokens: int,
+        width: int,
+        height: int,
+    ) -> List[Detection]:
+        prompt = self._detection_prompt(categories)
+        text = self._generate(
+            pil_image, prompt, max_new_tokens=max_tokens, greedy=True
+        )
+        LOGGER.debug(f"detection raw model output: {text!r}")
+        return self._detections_from_response(text, width, height)
 
     async def get_detections_from_camera(
         self,
@@ -496,33 +528,59 @@ class qwen(Vision, Reconfigurable):
         extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> List[Detection]:
-        # Default: one vision pass grounding a fixed common-category list
-        # (Qwen cookbook style). Optional auto_label: list objects, then ground
-        # those (~2x slower, open-vocab). Or extra.query for specific classes.
+        # Default (auto_label): moondream-style list objects, then ground those
+        # categories. extra.query filters the list ("people", "vehicles", …).
+        # auto_label=false: single-pass category grounding (fixed list or query).
         pil_image = self._prepare_image(image)
+        original = viam_to_pil_image(image)
+        width, height = original.size
         query = extra.get("query") if extra else None
-        if not (query and str(query).strip()) and self._resolve_auto_label(extra):
-            names = self._list_object_names(pil_image)
-            if not names:
-                LOGGER.warning("object listing returned no names; no detections")
-                return []
-            query = ", ".join(names)
-            LOGGER.debug(f"auto-listed detection categories: {query}")
-
-        prompt = self._detection_prompt(query)
         max_tokens = self.detection_max_new_tokens
         if extra is not None and extra.get("max_new_tokens") is not None:
             max_tokens = int(extra["max_new_tokens"])
-        text = self._generate(
-            pil_image, prompt, max_new_tokens=max_tokens, greedy=True
+
+        if self._resolve_auto_label(extra):
+            names = self._list_object_names(pil_image, query)
+            if not names:
+                LOGGER.warning("object listing returned no names; no detections")
+                return []
+            LOGGER.debug(f"auto-listed detection categories: {names}")
+            joined = ", ".join(names)
+            detections = self._ground_categories(
+                pil_image, joined, max_tokens=max_tokens, width=width, height=height
+            )
+            # Small models often fail combined JSON; ground one class at a time.
+            if not detections:
+                LOGGER.info(
+                    "combined grounding returned no boxes; "
+                    "falling back to per-object grounding"
+                )
+                for name in names[:MAX_PER_OBJECT_GROUND]:
+                    detections.extend(
+                        self._ground_categories(
+                            pil_image,
+                            name,
+                            max_tokens=min(max_tokens, 256),
+                            width=width,
+                            height=height,
+                        )
+                    )
+            if not detections:
+                LOGGER.warning(
+                    f"no detections after list-then-ground for names={names!r}"
+                )
+            return detections
+
+        categories = (
+            str(query).strip()
+            if query and str(query).strip()
+            else DEFAULT_DETECTION_CATEGORIES
         )
-        LOGGER.debug(f"detection raw model output: {text!r}")
-        # Map boxes onto the original camera frame, not the resized inference image.
-        original = viam_to_pil_image(image)
-        width, height = original.size
-        detections = self._detections_from_response(text, width, height)
+        detections = self._ground_categories(
+            pil_image, categories, max_tokens=max_tokens, width=width, height=height
+        )
         if not detections:
-            LOGGER.warning(f"no detections produced from model output: {text!r}")
+            LOGGER.warning(f"no detections produced for categories={categories!r}")
         return detections
 
     async def get_classifications_from_camera(

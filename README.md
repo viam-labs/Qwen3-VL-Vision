@@ -63,7 +63,7 @@ On the new service panel, copy and paste the following attribute template into y
 | `max_new_tokens` | number | Optional | Max tokens for classification (default `256`). |
 | `detection_max_new_tokens` | number | Optional | Max tokens for detection JSON (default `512`). |
 | `max_image_side` | number | Optional | Longest image side in pixels before inference (default `512`). Lower is faster. |
-| `auto_label` | bool | Optional | If `true`, list objects then ground those categories (~2x slower, open-vocab). Default `false` (single pass over a common category list). Overridable via `extra.auto_label`. |
+| `auto_label` | bool | Optional | Moondream-style list-then-ground. Default `true`. Set `false` for a faster single-pass over a fixed category list. Overridable via `extra.auto_label`. |
 | `do_sample` | bool | Optional | Enable sampling for classifications (default `false`). Detections are always greedy. |
 | `temperature` | number | Optional | Sampling temperature when `do_sample` is true (default `0.7`). |
 | `top_p` | number | Optional | Nucleus sampling when `do_sample` is true (default `0.8`). |
@@ -122,7 +122,7 @@ Override the prompt with `extra={"question": "..."}`.
 
 Asks for JSON `{"bbox_2d": [x1,y1,x2,y2], "label": "..."}` on the 0–1000 grid, then converts to Viam detections.
 
-By default this uses **one** vision pass grounding a fixed common-category list (person, chair, laptop, etc.). Pass `extra={"query": "person, chair, laptop"}` for your own classes in one pass, or set `"auto_label": true` to list objects first then ground them (~2x slower, fully open-vocab).
+By default this uses the **moondream auto-label** flow: list visible objects, then ground those categories for boxes (~2 vision passes; falls back to per-object grounding if needed). Pass `extra={"query": "people"}` to only list/ground that kind of thing, or set `"auto_label": false` for a faster single-pass over a fixed category list.
 
 ## Migration from `qwen3-vl-vision`
 

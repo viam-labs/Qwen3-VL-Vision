@@ -120,7 +120,10 @@ class TestGeneration:
     @pytest.mark.asyncio
     async def test_detections_use_greedy_decoding(self, service):
         response = '[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]'
-        with patch.object(service, "_generate", wraps=service._generate) as gen:
+        with (
+            patch.object(service, "_list_object_names", return_value=["box"]),
+            patch.object(service, "_generate", wraps=service._generate) as gen,
+        ):
             service._test_llm.create_chat_completion.return_value = {
                 "choices": [{"message": {"content": response}}]
             }
@@ -222,14 +225,16 @@ class TestDetections:
             '{"bbox_2d": [500, 500, 900, 900], "label": "chair"}]'
         )
         with (
-            patch.object(service, "_list_object_names") as list_objs,
+            patch.object(
+                service, "_list_object_names", return_value=["person", "chair"]
+            ) as list_objs,
             patch.object(service, "_generate", return_value=response) as gen,
         ):
             result = await service.get_detections(make_jpeg_image(100, 50))
 
-        list_objs.assert_not_called()
+        list_objs.assert_called_once()
         prompt = gen.call_args[0][1]
-        assert 'categories: "person, man, woman' in prompt
+        assert 'categories: "person, chair"' in prompt
         assert [d.class_name for d in result] == ["person", "chair"]
         assert result[0].x_min == 10
         assert result[0].y_min == 10
@@ -249,35 +254,56 @@ class TestDetections:
         assert result[0].x_min == 10
 
     @pytest.mark.asyncio
-    async def test_query_skips_listing(self, service):
+    async def test_query_filters_listing(self, service):
+        response = '[{"bbox_2d": [0, 0, 1000, 1000], "label": "person"}]'
+        with (
+            patch.object(
+                service, "_list_object_names", return_value=["person"]
+            ) as list_objs,
+            patch.object(service, "_generate", return_value=response) as gen,
+        ):
+            result = await service.get_detections(
+                make_jpeg_image(), extra={"query": "people"}
+            )
+        list_objs.assert_called_once_with(
+            list_objs.call_args[0][0], "people"
+        )
+        assert 'categories: "person"' in gen.call_args[0][1]
+        assert result[0].class_name == "person"
+
+    @pytest.mark.asyncio
+    async def test_auto_label_false_uses_fixed_categories(self, service):
         response = '[{"bbox_2d": [0, 0, 1000, 1000], "label": "person"}]'
         with (
             patch.object(service, "_list_object_names") as list_objs,
             patch.object(service, "_generate", return_value=response) as gen,
         ):
             result = await service.get_detections(
-                make_jpeg_image(), extra={"query": "people"}
+                make_jpeg_image(), extra={"auto_label": False}
             )
         list_objs.assert_not_called()
-        prompt = gen.call_args[0][1]
-        assert 'categories: "people"' in prompt
+        assert 'categories: "person, man, woman' in gen.call_args[0][1]
         assert result[0].class_name == "person"
 
     @pytest.mark.asyncio
-    async def test_auto_label_lists_then_grounds(self, service):
-        response = '[{"bbox_2d": [0, 0, 1000, 1000], "label": "chair"}]'
+    async def test_per_object_fallback_when_combined_empty(self, service):
         with (
             patch.object(
-                service, "_list_object_names", return_value=["person", "chair"]
-            ) as list_objs,
-            patch.object(service, "_generate", return_value=response) as gen,
+                service, "_list_object_names", return_value=["cup", "book"]
+            ),
+            patch.object(
+                service,
+                "_ground_categories",
+                side_effect=[
+                    [],
+                    [MagicMock(class_name="cup")],
+                    [MagicMock(class_name="book")],
+                ],
+            ) as ground,
         ):
-            result = await service.get_detections(
-                make_jpeg_image(), extra={"auto_label": True}
-            )
-        list_objs.assert_called_once()
-        assert 'categories: "person, chair"' in gen.call_args[0][1]
-        assert result[0].class_name == "chair"
+            result = await service.get_detections(make_jpeg_image())
+        assert ground.call_count == 3
+        assert [d.class_name for d in result] == ["cup", "book"]
 
     @pytest.mark.asyncio
     async def test_auto_label_empty_list(self, service):
@@ -285,16 +311,17 @@ class TestDetections:
             patch.object(service, "_list_object_names", return_value=[]),
             patch.object(service, "_generate") as gen,
         ):
-            result = await service.get_detections(
-                make_jpeg_image(), extra={"auto_label": True}
-            )
+            result = await service.get_detections(make_jpeg_image())
         assert result == []
         gen.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_from_camera(self, service):
         response = '[{"bbox_2d": [0, 0, 500, 500], "label": "cup"}]'
-        with patch.object(service, "_generate", return_value=response):
+        with (
+            patch.object(service, "_list_object_names", return_value=["cup"]),
+            patch.object(service, "_generate", return_value=response),
+        ):
             result = await service.get_detections_from_camera("cam")
         assert len(result) == 1
         service._test_camera.get_images.assert_awaited()
@@ -310,10 +337,13 @@ class TestDetections:
                 Camera.get_resource_name("cam-b"): cam_b,
             },
         )
-        with patch.object(
-            service,
-            "_generate",
-            return_value='[{"bbox_2d": [0, 0, 500, 500], "label": "cup"}]',
+        with (
+            patch.object(service, "_list_object_names", return_value=["cup"]),
+            patch.object(
+                service,
+                "_generate",
+                return_value='[{"bbox_2d": [0, 0, 500, 500], "label": "cup"}]',
+            ),
         ):
             await service.get_detections_from_camera("cam-b")
         cam_b.get_images.assert_awaited()
@@ -347,6 +377,7 @@ class TestPropertiesAndCaptureAll:
             "_generate",
             side_effect=[
                 "a scene",
+                "box",
                 '[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]',
             ],
         ):
