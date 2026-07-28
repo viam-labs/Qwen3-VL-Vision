@@ -89,9 +89,9 @@ class TestReconfigure:
             {Camera.get_resource_name("cam"): cam},
         )
         from_pretrained.assert_called_once()
-        assert from_pretrained.call_args[0][0] == "Qwen/Qwen3-VL-2B-Thinking"
+        assert from_pretrained.call_args[0][0] == "Qwen/Qwen3-VL-2B-Instruct"
         assert from_pretrained.call_args.kwargs["device_map"] == "auto"
-        proc_from_pretrained.assert_called_once_with("Qwen/Qwen3-VL-2B-Thinking")
+        proc_from_pretrained.assert_called_once_with("Qwen/Qwen3-VL-2B-Instruct")
 
     def test_custom_model(self, mock_hf):
         from_pretrained, _, _, _ = mock_hf
@@ -114,6 +114,24 @@ class TestReconfigure:
     def test_missing_camera_dependency(self, mock_hf):
         with pytest.raises(Exception, match="camera dependency"):
             Qwen3VL.new(make_config({"camera": "cam"}), {})
+
+
+class TestGeneration:
+    @pytest.mark.asyncio
+    async def test_detections_use_greedy_decoding(self, service):
+        response = '[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]'
+        with patch.object(service, "_generate", wraps=service._generate) as gen:
+            service._test_processor.batch_decode.return_value = [response]
+            await service.get_detections(make_jpeg_image())
+        assert gen.call_args.kwargs.get("greedy") is True
+
+    @pytest.mark.asyncio
+    async def test_generate_defaults_to_do_sample_false(self, service):
+        service._test_processor.batch_decode.return_value = ["ok"]
+        await service.get_classifications(make_jpeg_image(), 1)
+        kwargs = service._test_model.generate.call_args.kwargs
+        assert kwargs.get("do_sample") is False
+        assert kwargs.get("max_new_tokens") == 512
 
 
 class TestClassifications:

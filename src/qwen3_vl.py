@@ -35,10 +35,10 @@ disable_progress_bar()
 
 LOGGER = getLogger(__name__)
 
-DEFAULT_MODEL = "Qwen/Qwen3-VL-2B-Thinking"
+DEFAULT_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 DEFAULT_CLASSIFICATION_PROMPT = "describe this image"
-DEFAULT_MAX_NEW_TOKENS = 2048
-DEFAULT_DETECTION_MAX_NEW_TOKENS = 4096
+DEFAULT_MAX_NEW_TOKENS = 512
+DEFAULT_DETECTION_MAX_NEW_TOKENS = 512
 
 # Qwen3-VL grounding uses relative coordinates on a 0–1000 grid.
 BBOX_SCALE = 1000.0
@@ -74,6 +74,7 @@ class qwen3_vl(Vision, Reconfigurable):
     classification_prompt: str
     max_new_tokens: int
     detection_max_new_tokens: int
+    do_sample: bool
     temperature: float
     top_p: float
     top_k: int
@@ -118,7 +119,11 @@ class qwen3_vl(Vision, Reconfigurable):
                 fields["detection_max_new_tokens"].number_value
             )
 
-        # Recommended VL sampling defaults from the Qwen3-VL model card.
+        # Greedy by default for speed/determinism on Mac MPS; enable sampling explicitly.
+        self.do_sample = False
+        if "do_sample" in fields:
+            self.do_sample = fields["do_sample"].bool_value
+
         self.temperature = 1.0
         if "temperature" in fields:
             self.temperature = float(fields["temperature"].number_value)
@@ -138,8 +143,13 @@ class qwen3_vl(Vision, Reconfigurable):
         dtype: Any = "auto"
         if dtype_name and dtype_name != "auto":
             dtype = getattr(torch, dtype_name)
+        elif torch.backends.mps.is_available():
+            # Prefer bf16 on Apple Silicon; plain "auto" often lands on slower float32 paths.
+            dtype = torch.bfloat16
 
-        LOGGER.info(f"loading Qwen3-VL model '{model_id}' (device_map={device_map})")
+        LOGGER.info(
+            f"loading Qwen3-VL model '{model_id}' (device_map={device_map}, dtype={dtype})"
+        )
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_id,
             dtype=dtype,
@@ -167,7 +177,14 @@ class qwen3_vl(Vision, Reconfigurable):
             return text[match.end() :].strip()
         return text.strip()
 
-    def _generate(self, pil_image, prompt: str, *, max_new_tokens: int) -> str:
+    def _generate(
+        self,
+        pil_image,
+        prompt: str,
+        *,
+        max_new_tokens: int,
+        greedy: bool = False,
+    ) -> str:
         messages = [
             {
                 "role": "user",
@@ -186,14 +203,18 @@ class qwen3_vl(Vision, Reconfigurable):
         )
         inputs = inputs.to(self.model.device)
 
-        generated_ids = self.model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            top_k=self.top_k,
-        )
+        gen_kwargs: dict[str, Any] = {"max_new_tokens": max_new_tokens}
+        if greedy or not self.do_sample:
+            gen_kwargs["do_sample"] = False
+        else:
+            gen_kwargs.update(
+                do_sample=True,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
+            )
+
+        generated_ids = self.model.generate(**inputs, **gen_kwargs)
         trimmed = [
             out_ids[len(in_ids) :]
             for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -312,7 +333,9 @@ class qwen3_vl(Vision, Reconfigurable):
         max_tokens = self.detection_max_new_tokens
         if extra is not None and extra.get("max_new_tokens") is not None:
             max_tokens = int(extra["max_new_tokens"])
-        text = self._generate(pil_image, prompt, max_new_tokens=max_tokens)
+        text = self._generate(
+            pil_image, prompt, max_new_tokens=max_tokens, greedy=True
+        )
         width, height = pil_image.size
         return self._detections_from_response(text, width, height)
 

@@ -2,9 +2,9 @@
 
 This module implements the [rdk vision API](https://github.com/rdk/vision-api) in a `viam-labs:vision:qwen3-vl` model.
 
-It runs [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-2B-Thinking) locally via [Hugging Face Transformers](https://huggingface.co/docs/transformers) for image classification / Q&A and open-vocabulary object detection (2D grounding with `bbox_2d` coordinates). The default weights are **Qwen3-VL-2B-Thinking**.
+It runs [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct) locally via [Hugging Face Transformers](https://huggingface.co/docs/transformers) for image classification / Q&A and open-vocabulary object detection (2D grounding with `bbox_2d` coordinates). The default weights are **Qwen3-VL-2B-Instruct** (faster than Thinking for detection / Q&A on Mac MPS).
 
-Local inference needs enough GPU or Apple Silicon / CPU memory for the chosen checkpoint. The 2B Thinking model is the lightest starting point; larger Instruct / Thinking variants work by setting `model`.
+Local inference needs enough GPU or Apple Silicon / CPU memory for the chosen checkpoint. Prefer Instruct for interactive use; set `model` to a Thinking checkpoint when you want CoT reasoning.
 
 If your Python was built without `lzma` (common with some pyenv installs), this module installs a compatibility shim so `torchvision` / `AutoProcessor` can import. Prefer a Python with `libxz`/`lzma` support when possible (`brew install xz` before building Python).
 
@@ -20,7 +20,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest
 ```
 
-On first module setup (`run.sh` before `.installed` exists), dependencies are installed and the default model weights are prefetched into the Hugging Face cache via `prefetch_model.py`. Set `HF_TOKEN` if needed for rate limits or gated assets. Override the prefetch checkpoint with `QWEN3_VL_MODEL`. Delete `.installed` and restart the module to re-run setup.
+On first module setup (`run.sh` before `.installed` exists), dependencies are installed and the default model weights are prefetched into the Hugging Face cache via `prefetch_model.py`. Set `HF_TOKEN` if needed for rate limits or gated assets. Override the prefetch checkpoint with `QWEN3_VL_MODEL`. Delete `.installed` and restart the module to re-run setup (needed after changing the default model).
 
 ## Configure your vision service
 
@@ -50,19 +50,20 @@ The following attributes are available for `viam-labs:vision:qwen3-vl` model:
 | Name | Type | Inclusion | Description |
 | ---- | ---- | --------- | ----------- |
 | `camera` | string | **Required** | Default camera dependency for the service. Camera-based API methods use the `camera_name` argument; add extra cameras via `depends_on` if needed. |
-| `model` | string | Optional | Hugging Face model id. Defaults to [`Qwen/Qwen3-VL-2B-Thinking`](https://huggingface.co/Qwen/Qwen3-VL-2B-Thinking). |
+| `model` | string | Optional | Hugging Face model id. Defaults to [`Qwen/Qwen3-VL-2B-Instruct`](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct). Use `Qwen/Qwen3-VL-2B-Thinking` for CoT (much slower). |
 | `classification_prompt` | string | Optional | Default question for classifications. Defaults to `"describe this image"`. Overridden by `extra.question` when provided. |
 | `device_map` | string | Optional | Transformers `device_map` (default `"auto"`). |
-| `dtype` | string | Optional | Torch dtype name (`"auto"`, `"bfloat16"`, `"float16"`, `"float32"`). Defaults to `"auto"`. |
-| `max_new_tokens` | number | Optional | Max new tokens for classification / Q&A (default `2048`). Thinking models need headroom for CoT. |
-| `detection_max_new_tokens` | number | Optional | Max new tokens for detection grounding (default `4096`). |
-| `temperature` | number | Optional | Sampling temperature (default `1.0`, per Qwen3-VL VL defaults). |
-| `top_p` | number | Optional | Nucleus sampling `top_p` (default `0.95`). |
-| `top_k` | number | Optional | `top_k` sampling (default `20`). |
+| `dtype` | string | Optional | Torch dtype name (`"auto"`, `"bfloat16"`, `"float16"`, `"float32"`). On Apple Silicon defaults to `bfloat16`; otherwise `"auto"`. |
+| `max_new_tokens` | number | Optional | Max new tokens for classification / Q&A (default `512`). Raise for Thinking models. |
+| `detection_max_new_tokens` | number | Optional | Max new tokens for detection grounding (default `512`). |
+| `do_sample` | bool | Optional | Enable sampling for classifications (default `false` / greedy). Detections always use greedy decoding for JSON stability. |
+| `temperature` | number | Optional | Sampling temperature when `do_sample` is true (default `1.0`). |
+| `top_p` | number | Optional | Nucleus sampling `top_p` when `do_sample` is true (default `0.95`). |
+| `top_k` | number | Optional | `top_k` sampling when `do_sample` is true (default `20`). |
 
 ### Example Configurations
 
-Default 2B Thinking model:
+Default 2B Instruct (recommended on Mac):
 
 ```json
 {
@@ -70,7 +71,18 @@ Default 2B Thinking model:
 }
 ```
 
-Larger Instruct checkpoint in bfloat16:
+Thinking model (slower, longer CoT):
+
+```json
+{
+  "camera": "cam",
+  "model": "Qwen/Qwen3-VL-2B-Thinking",
+  "max_new_tokens": 2048,
+  "detection_max_new_tokens": 2048
+}
+```
+
+Larger Instruct checkpoint:
 
 ```json
 {
@@ -116,7 +128,7 @@ Thinking editions may emit CoT before the final answer; the module strips `</thi
 
 ### get_detections_from_camera(camera_name=*string*)
 
-Detections use Qwen3-VL [2D grounding](https://huggingface.co/Qwen/Qwen3-VL-2B-Thinking): a single generation that asks for a JSON list of `{"bbox_2d": [x1,y1,x2,y2], "label": "..."}` entries on the model’s **0–1000** coordinate grid, then converts those boxes to pixel and normalized Viam detections.
+Detections use Qwen3-VL [2D grounding](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct): a single generation that asks for a JSON list of `{"bbox_2d": [x1,y1,x2,y2], "label": "..."}` entries on the model’s **0–1000** coordinate grid, then converts those boxes to pixel and normalized Viam detections. Decoding is greedy for stable JSON.
 
 By default, all visible objects are requested. Pass `extra={"query": "..."}` to limit the set (for example, only people or vehicles):
 

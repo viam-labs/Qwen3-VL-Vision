@@ -7,7 +7,7 @@ import sys
 from huggingface_hub import snapshot_download
 
 # Keep in sync with src/qwen3_vl.py DEFAULT_MODEL
-DEFAULT_MODEL = "Qwen/Qwen3-VL-2B-Thinking"
+DEFAULT_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 
 
 def main() -> int:
