@@ -135,7 +135,7 @@ class TestGeneration:
         await service.get_classifications(make_jpeg_image(), 1)
         kwargs = service._test_llm.create_chat_completion.call_args.kwargs
         assert kwargs.get("temperature") == 0.0
-        assert kwargs.get("max_tokens") == 128
+        assert kwargs.get("max_tokens") == 256
 
 
 class TestClassifications:
@@ -145,7 +145,7 @@ class TestClassifications:
             result = await service.get_classifications(make_jpeg_image(), 1)
         assert result[0].class_name == "a red square"
         assert result[0].confidence == pytest.approx(1.0)
-        assert "describe this image" in gen.call_args[0][1]
+        assert "Describe this image in 2-3 sentences" in gen.call_args[0][1]
 
     @pytest.mark.asyncio
     async def test_config_classification_prompt(self, mock_llama):
@@ -229,7 +229,7 @@ class TestDetections:
 
         list_objs.assert_not_called()
         prompt = gen.call_args[0][1]
-        assert "Locate every visible object" in prompt
+        assert 'categories: "person, man, woman' in prompt
         assert [d.class_name for d in result] == ["person", "chair"]
         assert result[0].x_min == 10
         assert result[0].y_min == 10

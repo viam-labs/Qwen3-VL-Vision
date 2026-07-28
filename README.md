@@ -59,11 +59,11 @@ On the new service panel, copy and paste the following attribute template into y
 | `mmproj_path` | string | Optional | Local path to mmproj GGUF (skips Hub download for mmproj). |
 | `n_gpu_layers` | number | Optional | Layers to offload to GPU/Metal (`-1` = all, default). Use `0` for CPU-only. |
 | `n_ctx` | number | Optional | Context window (default `4096`). |
-| `classification_prompt` | string | Optional | Default classification question (`describe this image`). |
-| `max_new_tokens` | number | Optional | Max tokens for classification (default `128`). |
-| `detection_max_new_tokens` | number | Optional | Max tokens for detection JSON (default `768`). |
+| `classification_prompt` | string | Optional | Default classification question. Asks for a 2–3 sentence scene description by default. |
+| `max_new_tokens` | number | Optional | Max tokens for classification (default `256`). |
+| `detection_max_new_tokens` | number | Optional | Max tokens for detection JSON (default `512`). |
 | `max_image_side` | number | Optional | Longest image side in pixels before inference (default `768`). Lower is faster. |
-| `auto_label` | bool | Optional | If `true`, list objects then ground those categories (~2x slower, often better recall). Default `false` (single pass). Overridable via `extra.auto_label`. |
+| `auto_label` | bool | Optional | If `true`, list objects then ground those categories (~2x slower, open-vocab). Default `false` (single pass over a common category list). Overridable via `extra.auto_label`. |
 | `do_sample` | bool | Optional | Enable sampling for classifications (default `false`). Detections are always greedy. |
 | `temperature` | number | Optional | Sampling temperature when `do_sample` is true (default `0.7`). |
 | `top_p` | number | Optional | Nucleus sampling when `do_sample` is true (default `0.8`). |
@@ -108,4 +108,4 @@ Override the prompt with `extra={"question": "..."}`.
 
 Asks for JSON `{"bbox_2d": [x1,y1,x2,y2], "label": "..."}` on the 0–1000 grid, then converts to Viam detections.
 
-By default this uses **one** vision pass with an open-vocab JSON prompt (fast). For higher recall at ~2x latency, set `"auto_label": true` (list objects, then ground those categories). Or pass `extra={"query": "person, chair, laptop"}` to detect specific classes in one pass.
+By default this uses **one** vision pass grounding a fixed common-category list (person, chair, laptop, etc.) — the style Qwen3-VL follows reliably. Pass `extra={"query": "person, chair, laptop"}` for your own classes in one pass, or set `"auto_label": true` to list objects first then ground them (~2x slower, fully open-vocab).

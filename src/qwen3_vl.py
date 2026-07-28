@@ -37,9 +37,12 @@ LOGGER = getLogger(__name__)
 DEFAULT_MODEL_REPO = "Qwen/Qwen3-VL-2B-Instruct-GGUF"
 DEFAULT_MODEL_FILE = "Qwen3VL-2B-Instruct-Q4_K_M.gguf"
 DEFAULT_MMPROJ_FILE = "mmproj-Qwen3VL-2B-Instruct-F16.gguf"
-DEFAULT_CLASSIFICATION_PROMPT = "describe this image in one short sentence"
-DEFAULT_MAX_NEW_TOKENS = 128
-DEFAULT_DETECTION_MAX_NEW_TOKENS = 768
+DEFAULT_CLASSIFICATION_PROMPT = (
+    "Describe this image in 2-3 sentences. Cover the overall scene, "
+    "notable people or objects, and any important details or actions."
+)
+DEFAULT_MAX_NEW_TOKENS = 256
+DEFAULT_DETECTION_MAX_NEW_TOKENS = 512
 DEFAULT_N_CTX = 4096
 DEFAULT_N_GPU_LAYERS = -1
 DEFAULT_MAX_IMAGE_SIDE = 768
@@ -47,14 +50,13 @@ DEFAULT_MAX_IMAGE_SIDE = 768
 # Qwen3-VL grounding uses relative coordinates on a 0–1000 grid.
 BBOX_SCALE = 1000.0
 
-# Single-pass open-vocab (default): one vision encode. Stronger than a vague
-# "locate every object" line, without the 2x latency of list-then-ground.
-DETECTION_PROMPT_ALL = (
-    "Locate every visible object in this image, including people, furniture, "
-    "electronics, clothing, and other items. "
-    "Output a JSON array only. Each item must have "
-    '"bbox_2d": [x1, y1, x2, y2] integers in 0-1000 and "label". '
-    "Include as many distinct objects as you can see."
+# Vague "detect everything" prompts often return prose or empty JSON on 2B.
+# Cookbook-style category grounding is what this model follows reliably.
+# Common indoor / desk / street classes for a useful single-pass default.
+DEFAULT_DETECTION_CATEGORIES = (
+    "person, man, woman, child, chair, table, sofa, desk, bed, laptop, "
+    "monitor, keyboard, mouse, phone, bottle, cup, mug, book, bag, backpack, "
+    "plant, lamp, door, window, tv, remote, glasses, headphones, car, bicycle"
 )
 
 LIST_OBJECTS_PROMPT = (
@@ -461,9 +463,13 @@ class qwen3_vl(Vision, Reconfigurable):
         return names
 
     def _detection_prompt(self, query: Optional[str] = None) -> str:
-        if query and str(query).strip():
-            return DETECTION_PROMPT_QUERY.format(query=str(query).strip())
-        return DETECTION_PROMPT_ALL
+        # Always use category grounding; open-vocab prose prompts under-fire on 2B.
+        categories = (
+            str(query).strip()
+            if query and str(query).strip()
+            else DEFAULT_DETECTION_CATEGORIES
+        )
+        return DETECTION_PROMPT_QUERY.format(query=categories)
 
     def _resolve_auto_label(self, extra: Optional[Mapping[str, Any]]) -> bool:
         if extra is not None and "auto_label" in extra:
@@ -488,10 +494,9 @@ class qwen3_vl(Vision, Reconfigurable):
         extra: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> List[Detection]:
-        # Default: one vision pass with a strong open-vocab JSON prompt.
-        # Optional auto_label (config or extra): list objects, then ground those
-        # categories (better recall, ~2x slower). Or pass extra.query to ground
-        # only specific classes in one pass.
+        # Default: one vision pass grounding a fixed common-category list
+        # (Qwen cookbook style). Optional auto_label: list objects, then ground
+        # those (~2x slower, open-vocab). Or extra.query for specific classes.
         pil_image = self._prepare_image(image)
         query = extra.get("query") if extra else None
         if not (query and str(query).strip()) and self._resolve_auto_label(extra):
@@ -513,7 +518,10 @@ class qwen3_vl(Vision, Reconfigurable):
         # Map boxes onto the original camera frame, not the resized inference image.
         original = viam_to_pil_image(image)
         width, height = original.size
-        return self._detections_from_response(text, width, height)
+        detections = self._detections_from_response(text, width, height)
+        if not detections:
+            LOGGER.warning(f"no detections produced from model output: {text!r}")
+        return detections
 
     async def get_classifications_from_camera(
         self,
