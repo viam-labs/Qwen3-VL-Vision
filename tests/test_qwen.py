@@ -385,14 +385,16 @@ class TestPropertiesAndCaptureAll:
 
     @pytest.mark.asyncio
     async def test_capture_all_respects_flags(self, service):
-        with patch.object(
-            service,
-            "_generate",
-            side_effect=[
-                "a scene",
-                "box",
-                '[{"bbox_2d": [0, 0, 1000, 1000], "label": "box"}]',
-            ],
+        with (
+            patch.object(service, "_list_object_names") as list_objs,
+            patch.object(
+                service,
+                "_generate",
+                side_effect=[
+                    "A person sits at a table with a laptop.",
+                    '[{"bbox_2d": [0, 0, 1000, 1000], "label": "person"}]',
+                ],
+            ),
         ):
             result = await service.capture_all_from_camera(
                 "cam",
@@ -401,9 +403,48 @@ class TestPropertiesAndCaptureAll:
                 return_detections=True,
             )
 
+        list_objs.assert_not_called()
         assert result.image is not None
-        assert result.classifications[0].class_name == "a scene"
-        assert result.detections[0].class_name == "box"
+        assert "person" in result.classifications[0].class_name
+        assert result.detections[0].class_name == "person"
+
+    @pytest.mark.asyncio
+    async def test_capture_all_falls_back_to_listing(self, service):
+        # Caption mentions nothing in the default category list.
+        with (
+            patch.object(
+                service, "_list_object_names", return_value=["widget"]
+            ) as list_objs,
+            patch.object(
+                service,
+                "_generate",
+                side_effect=[
+                    "An abstract colorful pattern.",
+                    '[{"bbox_2d": [0, 0, 1000, 1000], "label": "widget"}]',
+                ],
+            ),
+        ):
+            result = await service.capture_all_from_camera(
+                "cam",
+                return_classifications=True,
+                return_detections=True,
+            )
+        list_objs.assert_called_once()
+        assert result.detections[0].class_name == "widget"
+
+    @pytest.mark.asyncio
+    async def test_object_names_extra_skips_listing(self, service):
+        response = '[{"bbox_2d": [0, 0, 1000, 1000], "label": "cup"}]'
+        with (
+            patch.object(service, "_list_object_names") as list_objs,
+            patch.object(service, "_generate", return_value=response) as gen,
+        ):
+            result = await service.get_detections(
+                make_jpeg_image(), extra={"object_names": ["cup", "book"]}
+            )
+        list_objs.assert_not_called()
+        assert 'categories: "cup, book"' in gen.call_args[0][1]
+        assert result[0].class_name == "cup"
 
     @pytest.mark.asyncio
     async def test_capture_all_skips_unrequested(self, service):

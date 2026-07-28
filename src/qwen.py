@@ -482,26 +482,15 @@ class qwen(Vision, Reconfigurable):
             )
         return detections
 
-    def _list_object_names(
-        self, pil_image, query: Optional[str] = None
-    ) -> List[str]:
-        """Ask for a comma-separated object list (moondream auto-label style)."""
-        if query and str(query).strip():
-            prompt = LIST_OBJECTS_QUERY_PROMPT.format(query=str(query).strip())
-        else:
-            prompt = LIST_OBJECTS_PROMPT
-        answer = self._generate(
-            pil_image, prompt, max_new_tokens=128, greedy=True
-        )
-        # Models sometimes return "a, b, and c" or bullet lines.
-        cleaned = answer.replace("\n", ",")
+    def _parse_name_list(self, text: str) -> List[str]:
+        """Parse a comma-separated object list from model or caller text."""
+        cleaned = (text or "").replace("\n", ",")
         names: List[str] = []
         seen = set()
         for part in cleaned.split(","):
             name = part.strip().strip(".-•*").strip()
             if name.lower().startswith("and "):
                 name = name[4:].strip()
-            # Drop prose / numbered leftovers from small models.
             if not name or len(name) > 40:
                 continue
             if name[:1].isdigit() and ". " in name[:4]:
@@ -514,6 +503,64 @@ class qwen(Vision, Reconfigurable):
             if len(names) >= MAX_AUTO_DETECT_OBJECTS:
                 break
         return names
+
+    def _coerce_object_names(self, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return self._parse_name_list(value)
+        if isinstance(value, (list, tuple)):
+            names: List[str] = []
+            seen = set()
+            for item in value:
+                for name in self._parse_name_list(str(item)):
+                    key = name.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    names.append(name)
+                    if len(names) >= MAX_AUTO_DETECT_OBJECTS:
+                        return names
+            return names
+        return self._parse_name_list(str(value))
+
+    def _object_names_from_caption(self, caption: str) -> List[str]:
+        """Pull known detection categories mentioned in a classification caption."""
+        if not caption or not str(caption).strip():
+            return []
+        padded = f" {str(caption).lower()} "
+        categories = [
+            c.strip() for c in DEFAULT_DETECTION_CATEGORIES.split(",") if c.strip()
+        ]
+        # Match longer phrases first ("coffee table" before "table" if added later).
+        categories.sort(key=len, reverse=True)
+        names: List[str] = []
+        seen = set()
+        for cat in categories:
+            token = cat.lower()
+            variants = (f" {token} ", f" {token}s ", f" {token}es ")
+            if not any(v in padded for v in variants):
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            names.append(cat)
+            if len(names) >= MAX_AUTO_DETECT_OBJECTS:
+                break
+        return names
+
+    def _list_object_names(
+        self, pil_image, query: Optional[str] = None
+    ) -> List[str]:
+        """Ask for a comma-separated object list (moondream auto-label style)."""
+        if query and str(query).strip():
+            prompt = LIST_OBJECTS_QUERY_PROMPT.format(query=str(query).strip())
+        else:
+            prompt = LIST_OBJECTS_PROMPT
+        answer = self._generate(
+            pil_image, prompt, max_new_tokens=128, greedy=True
+        )
+        return self._parse_name_list(answer)
 
     def _detection_prompt(self, query: Optional[str] = None) -> str:
         categories = (
@@ -571,8 +618,8 @@ class qwen(Vision, Reconfigurable):
     ) -> List[Detection]:
         # Default (auto_label): moondream-style list objects, then ground those
         # categories. extra.query filters the list ("people", "vehicles", …).
+        # extra.object_names skips listing (e.g. capture_all reuses classification).
         # auto_label=false: single-pass category grounding (fixed list or query).
-        # Use a larger frame for grounding — low vision token counts make boxes coarse.
         pil_image = self._prepare_detection_image(image)
         original = viam_to_pil_image(image)
         width, height = original.size
@@ -581,8 +628,15 @@ class qwen(Vision, Reconfigurable):
         if extra is not None and extra.get("max_new_tokens") is not None:
             max_tokens = int(extra["max_new_tokens"])
 
+        precomputed: Optional[List[str]] = None
+        if extra is not None and extra.get("object_names") is not None:
+            precomputed = self._coerce_object_names(extra.get("object_names"))
+
         if self._resolve_auto_label(extra):
-            names = self._list_object_names(pil_image, query)
+            if precomputed:
+                names = precomputed
+            else:
+                names = self._list_object_names(pil_image, query)
             if not names:
                 LOGGER.warning("object listing returned no names; no detections")
                 return []
@@ -683,12 +737,35 @@ class qwen(Vision, Reconfigurable):
     ) -> CaptureAllResult:
         result = CaptureAllResult()
         result.image = await self.get_cam_image(camera_name)
+        det_extra: Optional[dict[str, Any]] = dict(extra) if extra else None
+
         if return_classifications:
             result.classifications = await self.get_classifications(
                 result.image, 1, extra=extra
             )
+            # Reuse caption labels for detections so we don't list objects again.
+            if (
+                return_detections
+                and self._resolve_auto_label(extra)
+                and result.classifications
+                and (det_extra is None or det_extra.get("object_names") is None)
+                and (det_extra is None or det_extra.get("query") is None)
+            ):
+                caption = result.classifications[0].class_name
+                names = self._object_names_from_caption(caption)
+                if names:
+                    if det_extra is None:
+                        det_extra = {}
+                    det_extra["object_names"] = names
+                    LOGGER.debug(
+                        "capture_all reusing classification labels for detections: "
+                        f"{names}"
+                    )
+
         if return_detections:
-            result.detections = await self.get_detections(result.image, extra=extra)
+            result.detections = await self.get_detections(
+                result.image, extra=det_extra
+            )
         return result
 
     async def get_properties(

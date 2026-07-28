@@ -125,6 +125,8 @@ Asks for JSON `{"bbox_2d": [x1,y1,x2,y2], "label": "..."}` on the 0–1000 grid,
 
 By default this uses the **moondream auto-label** flow: list visible objects, then ground those categories for boxes (~2 vision passes; falls back to per-object grounding if needed). Pass `extra={"query": "people"}` to only list/ground that kind of thing, or set `"auto_label": false` for a faster single-pass over a fixed category list.
 
+`capture_all_from_camera` with both classifications and detections reuses category names mentioned in the caption (via `extra.object_names`) so it does not run a second object-listing pass.
+
 ## Migration from `qwen3-vl-vision`
 
 **Breaking:** module `viam-labs:qwen3-vl-vision` / model `viam-labs:vision:qwen3-vl` are replaced by:
