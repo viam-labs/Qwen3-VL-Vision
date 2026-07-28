@@ -39,10 +39,11 @@ DEFAULT_MODEL_REPO = "unsloth/Qwen3.5-0.8B-GGUF"
 DEFAULT_MODEL_FILE = "Qwen3.5-0.8B-Q4_K_M.gguf"
 DEFAULT_MMPROJ_FILE = "mmproj-F16.gguf"
 DEFAULT_CLASSIFICATION_PROMPT = (
-    "Describe this image in 2-3 sentences. Cover the overall scene, "
-    "notable people or objects, and any important details or actions."
+    "Describe this image in exactly 2 or 3 short sentences of plain prose. "
+    "Mention the overall scene, people, and notable objects. "
+    "Do not use headings, bullet lists, markdown, or section labels."
 )
-DEFAULT_MAX_NEW_TOKENS = 256
+DEFAULT_MAX_NEW_TOKENS = 512
 DEFAULT_DETECTION_MAX_NEW_TOKENS = 512
 DEFAULT_N_CTX = 2048
 DEFAULT_N_GPU_LAYERS = -1

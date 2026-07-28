@@ -138,7 +138,7 @@ class TestGeneration:
         await service.get_classifications(make_jpeg_image(), 1)
         kwargs = service._test_llm.create_chat_completion.call_args.kwargs
         assert kwargs.get("temperature") == 0.0
-        assert kwargs.get("max_tokens") == 256
+        assert kwargs.get("max_tokens") == 512
 
 
 class TestClassifications:
@@ -148,7 +148,7 @@ class TestClassifications:
             result = await service.get_classifications(make_jpeg_image(), 1)
         assert result[0].class_name == "a red square"
         assert result[0].confidence == pytest.approx(1.0)
-        assert "Describe this image in 2-3 sentences" in gen.call_args[0][1]
+        assert "exactly 2 or 3 short sentences" in gen.call_args[0][1]
 
     @pytest.mark.asyncio
     async def test_config_classification_prompt(self, mock_llama):

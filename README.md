@@ -59,8 +59,8 @@ On the new service panel, copy and paste the following attribute template into y
 | `mmproj_path` | string | Optional | Local path to mmproj GGUF (skips Hub download for mmproj). |
 | `n_gpu_layers` | number | Optional | Layers to offload to GPU/Metal (`-1` = all, default). Use `0` for CPU-only. |
 | `n_ctx` | number | Optional | Context window (default `2048`). |
-| `classification_prompt` | string | Optional | Default classification question. Asks for a 2–3 sentence scene description by default. |
-| `max_new_tokens` | number | Optional | Max tokens for classification (default `256`). |
+| `classification_prompt` | string | Optional | Default classification question. Asks for 2–3 short plain sentences by default. |
+| `max_new_tokens` | number | Optional | Max tokens for classification (default `512`). Output truncates when this limit is hit. |
 | `detection_max_new_tokens` | number | Optional | Max tokens for detection JSON (default `512`). |
 | `max_image_side` | number | Optional | Longest image side for classifications (default `512`). Lower is faster. |
 | `detection_max_image_side` | number | Optional | Longest image side for detections (default `1024`). Higher improves box accuracy. If only `max_image_side` is set, detections use that value too. |
