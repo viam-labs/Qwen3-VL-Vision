@@ -1,7 +1,7 @@
 {
   "module_id": "viam-labs:qwen-vision",
   "visibility": "public",
-  "url": "https://github.com/viam-labs/Qwen3-VL-Vision",
+  "url": "https://github.com/viam-labs/Qwen-Vision",
   "description": "This vision model runs Qwen3.5-0.8B GGUF via llama.cpp (Metal on macOS, CUDA on Linux NVIDIA, otherwise CPU) for fast image classification, querying, and object detection on mobile and edge devices.",
   "models": [
     {
