@@ -1,4 +1,4 @@
-viam-sdk~=0.79.0
+viam-sdk~=0.80.0
 pillow
 huggingface_hub
 llama-cpp-python>=0.3.34
